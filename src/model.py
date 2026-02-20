@@ -1,16 +1,19 @@
 # =============================================================================
 # model.py
 # =============================================================================
-# Trains a Random Forest classifier on the extracted gait features and
-# evaluates performance with standard metrics.
+# Trains multiple classifiers on extracted gait features:
+#   1. Random Forest   (ensemble, interpretable)
+#   2. XGBoost         (gradient boosting, high accuracy)
+#   3. LSTM            (sequence modeling via Keras)
 #
 # Outputs
 # -------
-#   - Console: Accuracy, Precision, Recall, F1-score
-#   - Plots : Confusion matrix, Feature importance  (saved to output/)
+#   - Console : Accuracy, Precision, Recall, F1-score for each model
+#   - Plots   : Confusion matrices, Feature importance  (saved to output/)
 # =============================================================================
 
 import os
+import warnings
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -19,89 +22,106 @@ import matplotlib.pyplot as plt
 
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import (
-    accuracy_score,
-    precision_score,
-    recall_score,
-    f1_score,
-    confusion_matrix,
-    ConfusionMatrixDisplay,
-)
+from sklearn.metrics import (accuracy_score,precision_score,recall_score,f1_score,confusion_matrix,ConfusionMatrixDisplay)
+
+# XGBoost
+from xgboost import XGBClassifier
+
+# Suppress TensorFlow info logs
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 
-def train_and_evaluate(features_df: pd.DataFrame,
-                       output_dir: str = "output"):
-    """
-    Train a Random Forest on the feature DataFrame and print evaluation
-    metrics.
-
-    Parameters
-    ----------
-    features_df : pd.DataFrame
-        Must contain feature columns and a 'label' column (0/1).
-    output_dir : str
-        Directory where plots are saved.
-
-    Returns
-    -------
-    model : trained RandomForestClassifier
-    feature_names : list[str]
-    """
-    os.makedirs(output_dir, exist_ok=True)
-
-    # ── Separate features and label ──────────────────────────────────────
-    feature_cols = [c for c in features_df.columns if c != "label"]
-    X = features_df[feature_cols].values
-    y = features_df["label"].values
-
-    # ── Stratified 80 / 20 split ─────────────────────────────────────────
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, stratify=y, random_state=42
-    )
-
-    # ── Train Random Forest ──────────────────────────────────────────────
-    model = RandomForestClassifier(
-        n_estimators=100,
-        random_state=42,
-        n_jobs=-1,
-    )
-    model.fit(X_train, y_train)
-
-    # ── Predictions & Metrics ────────────────────────────────────────────
-    y_pred = model.predict(X_test)
-
-    acc  = accuracy_score(y_test, y_pred)
-    prec = precision_score(y_test, y_pred, zero_division=0)
-    rec  = recall_score(y_test, y_pred, zero_division=0)
-    f1   = f1_score(y_test, y_pred, zero_division=0)
-
-    print("\n" + "=" * 50)
-    print("  CLASSIFICATION RESULTS")
-    print("=" * 50)
+# ─────────────────────────────────────────────────────────────────────────────
+# Helper: print metrics for any model
+# ─────────────────────────────────────────────────────────────────────────────
+def _print_metrics(name, y_true, y_pred):
+    """Print classification metrics for a named model."""
+    acc  = accuracy_score(y_true, y_pred)
+    prec = precision_score(y_true, y_pred, zero_division=0)
+    rec  = recall_score(y_true, y_pred, zero_division=0)
+    f1   = f1_score(y_true, y_pred, zero_division=0)
+    print(f"\n  {'─' * 44}")
+    print(f"  {name}")
+    print(f"  {'─' * 44}")
     print(f"  Accuracy  : {acc:.4f}")
     print(f"  Precision : {prec:.4f}")
     print(f"  Recall    : {rec:.4f}")
     print(f"  F1-Score  : {f1:.4f}")
-    print("=" * 50 + "\n")
+    return {"accuracy": acc, "precision": prec, "recall": rec, "f1": f1}
 
-    # ── Confusion Matrix Plot ────────────────────────────────────────────
-    cm = confusion_matrix(y_test, y_pred)
+
+def _plot_confusion(name, y_true, y_pred, output_dir, filename):
+    """Save confusion matrix plot."""
+    cm = confusion_matrix(y_true, y_pred)
     fig, ax = plt.subplots(figsize=(6, 5))
     disp = ConfusionMatrixDisplay(
         confusion_matrix=cm,
         display_labels=["Healthy", "Parkinson"],
     )
     disp.plot(ax=ax, cmap="Blues", colorbar=False)
-    ax.set_title("Confusion Matrix", fontsize=14, fontweight="bold")
+    ax.set_title(f"Confusion Matrix — {name}", fontsize=14, fontweight="bold")
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "confusion_matrix.png"), dpi=150)
+    plt.savefig(os.path.join(output_dir, filename), dpi=150)
     plt.close()
-    print(f"  → Saved confusion_matrix.png")
+    print(f"  → Saved {filename}")
 
-    # ── Feature Importance Plot ──────────────────────────────────────────
-    importances = model.feature_importances_
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. RANDOM FOREST + XGBOOST  (traditional ML)
+# ─────────────────────────────────────────────────────────────────────────────
+def train_and_evaluate(features_df: pd.DataFrame,
+                       output_dir: str = "output"):
+    """
+    Train Random Forest and XGBoost on the feature DataFrame.
+
+    Returns
+    -------
+    rf_model : trained RandomForestClassifier  (used for live monitoring)
+    feature_names : list[str]
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    feature_cols = [c for c in features_df.columns if c != "label"]
+    X = features_df[feature_cols].values
+    y = features_df["label"].values
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, stratify=y, random_state=42
+    )
+
+    # ── Random Forest ────────────────────────────────────────────────────
+    rf = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
+    rf.fit(X_train, y_train)
+    rf_pred = rf.predict(X_test)
+
+    print("\n" + "=" * 50)
+    print("  CLASSIFICATION RESULTS")
+    print("=" * 50)
+    _print_metrics("Random Forest", y_test, rf_pred)
+    _plot_confusion("Random Forest", y_test, rf_pred, output_dir,
+                    "confusion_matrix_rf.png")
+
+    # ── XGBoost ──────────────────────────────────────────────────────────
+    xgb = XGBClassifier(
+        n_estimators=100,
+        max_depth=6,
+        learning_rate=0.1,
+        use_label_encoder=False,
+        eval_metric="logloss",
+        random_state=42,
+        verbosity=0,
+    )
+    xgb.fit(X_train, y_train)
+    xgb_pred = xgb.predict(X_test)
+
+    _print_metrics("XGBoost", y_test, xgb_pred)
+    _plot_confusion("XGBoost", y_test, xgb_pred, output_dir,
+                    "confusion_matrix_xgb.png")
+    print("=" * 50)
+
+    # ── Feature Importance (Random Forest) ───────────────────────────────
+    importances = rf.feature_importances_
     sorted_idx  = np.argsort(importances)
-
     fig, ax = plt.subplots(figsize=(7, 5))
     ax.barh(
         [feature_cols[i] for i in sorted_idx],
@@ -109,8 +129,8 @@ def train_and_evaluate(features_df: pd.DataFrame,
         color="#4C72B0",
     )
     ax.set_xlabel("Importance (Gini)")
-    ax.set_title("Feature Importance — Random Forest", fontsize=14,
-                 fontweight="bold")
+    ax.set_title("Feature Importance — Random Forest",
+                 fontsize=14, fontweight="bold")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "feature_importance.png"), dpi=150)
     plt.close()
@@ -120,13 +140,125 @@ def train_and_evaluate(features_df: pd.DataFrame,
     _plot_feature_comparison(features_df, feature_cols, output_dir)
 
     # ── Risk vs Variability scatter ──────────────────────────────────────
-    _plot_risk_vs_variability(model, features_df, feature_cols, output_dir)
+    _plot_risk_vs_variability(rf, features_df, feature_cols, output_dir)
 
-    return model, feature_cols
+    # ── Model Comparison Bar Chart ───────────────────────────────────────
+    _plot_model_comparison(
+        {"Random Forest": _get_metrics(y_test, rf_pred),
+         "XGBoost":       _get_metrics(y_test, xgb_pred)},
+        output_dir,
+    )
+
+    return rf, feature_cols
 
 
-# ─── Internal Helpers ────────────────────────────────────────────────────────
+def _get_metrics(y_true, y_pred):
+    return {
+        "Accuracy":  accuracy_score(y_true, y_pred),
+        "Precision": precision_score(y_true, y_pred, zero_division=0),
+        "Recall":    recall_score(y_true, y_pred, zero_division=0),
+        "F1":        f1_score(y_true, y_pred, zero_division=0),
+    }
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. LSTM  (sequence modeling)
+# ─────────────────────────────────────────────────────────────────────────────
+def train_lstm(features_df: pd.DataFrame, output_dir: str = "output"):
+    """
+    Train a simple LSTM model that treats each feature window as a
+    single-timestep sequence.
+
+    The LSTM receives the 7 gait features as a (1, 7) shaped input
+    per sample, demonstrating sequence modeling capability.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Lazy import to avoid slow TF startup if not needed
+    import tensorflow as tf
+    from tensorflow.keras.models import Sequential
+    from tensorflow.keras.layers import LSTM, Dense, Dropout
+    from tensorflow.keras.callbacks import EarlyStopping
+
+    # Suppress TF warnings
+    tf.get_logger().setLevel("ERROR")
+
+    feature_cols = [c for c in features_df.columns if c != "label"]
+    X = features_df[feature_cols].values
+    y = features_df["label"].values
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, stratify=y, random_state=42
+    )
+
+    # Reshape for LSTM: (samples, timesteps=1, features)
+    X_train_seq = X_train.reshape((X_train.shape[0], 1, X_train.shape[1]))
+    X_test_seq  = X_test.reshape((X_test.shape[0], 1, X_test.shape[1]))
+
+    # ── Build LSTM Model ─────────────────────────────────────────────────
+    model = Sequential([
+        LSTM(64, input_shape=(1, len(feature_cols)),
+             return_sequences=False),
+        Dropout(0.3),
+        Dense(32, activation="relu"),
+        Dropout(0.2),
+        Dense(1, activation="sigmoid"),
+    ])
+
+    model.compile(
+        optimizer="adam",
+        loss="binary_crossentropy",
+        metrics=["accuracy"],
+    )
+
+    print("\n  Training LSTM model...")
+    history = model.fit(
+        X_train_seq, y_train,
+        epochs=30,
+        batch_size=64,
+        validation_split=0.15,
+        callbacks=[EarlyStopping(patience=5, restore_best_weights=True)],
+        verbose=0,
+    )
+
+    # ── Evaluate ─────────────────────────────────────────────────────────
+    y_prob = model.predict(X_test_seq, verbose=0).flatten()
+    y_pred = (y_prob >= 0.5).astype(int)
+
+    metrics = _print_metrics("LSTM", y_test, y_pred)
+    _plot_confusion("LSTM", y_test, y_pred, output_dir,
+                    "confusion_matrix_lstm.png")
+
+    # ── Training History Plot ────────────────────────────────────────────
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+
+    ax1.plot(history.history["loss"], label="Train Loss")
+    ax1.plot(history.history["val_loss"], label="Val Loss")
+    ax1.set_xlabel("Epoch")
+    ax1.set_ylabel("Loss")
+    ax1.set_title("LSTM Training Loss", fontsize=13, fontweight="bold")
+    ax1.legend()
+    ax1.grid(alpha=0.3)
+
+    ax2.plot(history.history["accuracy"], label="Train Acc")
+    ax2.plot(history.history["val_accuracy"], label="Val Acc")
+    ax2.set_xlabel("Epoch")
+    ax2.set_ylabel("Accuracy")
+    ax2.set_title("LSTM Training Accuracy", fontsize=13, fontweight="bold")
+    ax2.legend()
+    ax2.grid(alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "lstm_training_history.png"), dpi=150)
+    plt.close()
+    print(f"  → Saved lstm_training_history.png")
+
+    return metrics
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Internal plot helpers
+# ─────────────────────────────────────────────────────────────────────────────
 def _plot_feature_comparison(features_df, feature_cols, output_dir):
     """Side-by-side box plots comparing each feature between groups."""
     fig, axes = plt.subplots(2, 4, figsize=(18, 8))
@@ -135,7 +267,7 @@ def _plot_feature_comparison(features_df, feature_cols, output_dir):
     for i, col in enumerate(feature_cols):
         if i >= len(axes):
             break
-        healthy  = features_df.loc[features_df["label"] == 0, col]
+        healthy   = features_df.loc[features_df["label"] == 0, col]
         parkinson = features_df.loc[features_df["label"] == 1, col]
         axes[i].boxplot(
             [healthy, parkinson],
@@ -146,7 +278,6 @@ def _plot_feature_comparison(features_df, feature_cols, output_dir):
         axes[i].set_title(col, fontsize=11, fontweight="bold")
         axes[i].grid(axis="y", alpha=0.3)
 
-    # Hide unused subplots
     for j in range(len(feature_cols), len(axes)):
         axes[j].set_visible(False)
 
@@ -159,9 +290,9 @@ def _plot_feature_comparison(features_df, feature_cols, output_dir):
 
 
 def _plot_risk_vs_variability(model, features_df, feature_cols, output_dir):
-    """Scatter plot of predicted Parkinson probability vs stride variability."""
+    """Scatter: predicted Parkinson probability vs stride variability."""
     X = features_df[feature_cols].values
-    probs = model.predict_proba(X)[:, 1]  # probability of class 1
+    probs = model.predict_proba(X)[:, 1]
 
     fig, ax = plt.subplots(figsize=(7, 5))
     colors = ["#2ca02c" if l == 0 else "#d62728"
@@ -179,3 +310,31 @@ def _plot_risk_vs_variability(model, features_df, feature_cols, output_dir):
     plt.savefig(os.path.join(output_dir, "risk_vs_variability.png"), dpi=150)
     plt.close()
     print(f"  → Saved risk_vs_variability.png")
+
+
+def _plot_model_comparison(results: dict, output_dir: str):
+    """Bar chart comparing metrics across all trained models."""
+    metrics = list(next(iter(results.values())).keys())
+    model_names = list(results.keys())
+    x = np.arange(len(metrics))
+    width = 0.8 / len(model_names)
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    colors = ["#4C72B0", "#DD8452", "#55A868", "#C44E52"]
+
+    for i, name in enumerate(model_names):
+        vals = [results[name][m] for m in metrics]
+        ax.bar(x + i * width, vals, width, label=name,
+               color=colors[i % len(colors)])
+
+    ax.set_xticks(x + width * (len(model_names) - 1) / 2)
+    ax.set_xticklabels(metrics)
+    ax.set_ylim(0, 1.05)
+    ax.set_ylabel("Score")
+    ax.set_title("Model Comparison", fontsize=14, fontweight="bold")
+    ax.legend()
+    ax.grid(axis="y", alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "model_comparison.png"), dpi=150)
+    plt.close()
+    print(f"  → Saved model_comparison.png")

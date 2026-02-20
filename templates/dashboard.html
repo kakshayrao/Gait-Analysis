@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gait Analysis — Parkinson Detection Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: #0f172a;
+            color: #e2e8f0;
+            line-height: 1.6;
+        }
+
+        /* ── Top Nav ─────────────────────────────── */
+        .navbar {
+            background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+            border-bottom: 1px solid #334155;
+            padding: 1rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .navbar h1 {
+            font-size: 1.3rem;
+            background: linear-gradient(135deg, #38bdf8, #818cf8);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .navbar a {
+            color: #38bdf8;
+            text-decoration: none;
+            font-weight: 600;
+            padding: 0.5rem 1.2rem;
+            border-radius: 8px;
+            border: 1px solid #38bdf8;
+            transition: all 0.3s;
+        }
+
+        .navbar a:hover {
+            background: #38bdf8;
+            color: #0f172a;
+        }
+
+        /* ── Container ───────────────────────────── */
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        /* ── Metric Cards ────────────────────────── */
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        .metric-card {
+            background: linear-gradient(135deg, #1e293b, #334155);
+            border-radius: 12px;
+            padding: 1.2rem;
+            text-align: center;
+            border: 1px solid #475569;
+            transition: transform 0.2s;
+            cursor: default;
+        }
+
+        .metric-card:hover {
+            transform: translateY(-3px);
+        }
+
+        .metric-card .value {
+            font-size: 2rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, #38bdf8, #a78bfa);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .metric-card .label {
+            font-size: 0.85rem;
+            color: #94a3b8;
+            margin-top: 0.3rem;
+        }
+
+        /* ── Section ─────────────────────────────── */
+        .section {
+            margin-bottom: 2.5rem;
+        }
+
+        .section h2 {
+            font-size: 1.4rem;
+            margin-bottom: 1rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 2px solid #334155;
+            color: #f1f5f9;
+        }
+
+        .section h2 span {
+            font-size: 0.9rem;
+            color: #64748b;
+            font-weight: 400;
+            margin-left: 0.5rem;
+        }
+
+        /* ── Plot Grid ───────────────────────────── */
+        .plot-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 1.5rem;
+        }
+
+        .plot-card {
+            background: #1e293b;
+            border-radius: 12px;
+            border: 1px solid #334155;
+            overflow: hidden;
+            transition: transform 0.2s, box-shadow 0.3s;
+        }
+
+        .plot-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.3);
+        }
+
+        .plot-card img {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        .plot-card .caption {
+            padding: 0.8rem 1rem;
+            font-size: 0.9rem;
+            color: #94a3b8;
+            border-top: 1px solid #334155;
+            background: #0f172a;
+        }
+
+        /* ── ADF Results ─────────────────────────── */
+        .adf-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1rem;
+        }
+
+        .adf-card {
+            background: #1e293b;
+            border-radius: 12px;
+            padding: 1.2rem;
+            border: 1px solid #334155;
+        }
+
+        .adf-card h3 {
+            color: #38bdf8;
+            margin-bottom: 0.5rem;
+        }
+
+        .adf-card table {
+            width: 100%;
+        }
+
+        .adf-card td {
+            padding: 0.3rem 0;
+        }
+
+        .adf-card td:first-child {
+            color: #94a3b8;
+        }
+
+        .adf-card td:last-child {
+            text-align: right;
+            font-family: monospace;
+            color: #e2e8f0;
+        }
+
+        .badge-yes {
+            background: #22c55e;
+            color: #052e16;
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
+        .badge-no {
+            background: #ef4444;
+            color: #fff;
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
+        /* ── Footer ──────────────────────────────── */
+        .footer {
+            text-align: center;
+            padding: 2rem;
+            color: #475569;
+            font-size: 0.85rem;
+            border-top: 1px solid #1e293b;
+        }
+    </style>
+</head>
+
+<body>
+
+    <nav class="navbar">
+        <h1>🦶 Gait Analysis — Parkinson Disease Detection</h1>
+        <a href="/live">▶ Live Monitoring</a>
+    </nav>
+
+    <div class="container">
+
+        <!-- ── Dataset Overview ────────────────────── -->
+        <div class="metrics-grid">
+            <div class="metric-card">
+                <div class="value">{{ metrics.dataset.total_files }}</div>
+                <div class="label">Total Subjects</div>
+            </div>
+            <div class="metric-card">
+                <div class="value">{{ metrics.dataset.healthy }}</div>
+                <div class="label">Healthy Controls</div>
+            </div>
+            <div class="metric-card">
+                <div class="value">{{ metrics.dataset.parkinson }}</div>
+                <div class="label">Parkinson Patients</div>
+            </div>
+            <div class="metric-card">
+                <div class="value">{{ metrics.dataset.total_windows }}</div>
+                <div class="label">Feature Windows</div>
+            </div>
+        </div>
+
+        <!-- ── Per-Model Metric Cards ────────────────── -->
+        <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:1.2rem; margin-bottom:2rem;">
+
+            <!-- Random Forest -->
+            <div style="background:#1e293b; border-radius:14px; border:1px solid #334155; padding:1.2rem;">
+                <h3 style="text-align:center; color:#38bdf8; margin-bottom:0.8rem; font-size:1.1rem;">🌲 Random Forest
+                </h3>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.6rem;">
+                    <div class="metric-card">
+                        <div class="value">{{ metrics.rf.accuracy }}</div>
+                        <div class="label">Accuracy</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="value">{{ metrics.rf.precision }}</div>
+                        <div class="label">Precision</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="value">{{ metrics.rf.recall }}</div>
+                        <div class="label">Recall</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="value">{{ metrics.rf.f1 }}</div>
+                        <div class="label">F1-Score</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- XGBoost -->
+            <div style="background:#1e293b; border-radius:14px; border:1px solid #334155; padding:1.2rem;">
+                <h3 style="text-align:center; color:#f97316; margin-bottom:0.8rem; font-size:1.1rem;">⚡ XGBoost</h3>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.6rem;">
+                    <div class="metric-card">
+                        <div class="value">{{ metrics.xgb.accuracy }}</div>
+                        <div class="label">Accuracy</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="value">{{ metrics.xgb.precision }}</div>
+                        <div class="label">Precision</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="value">{{ metrics.xgb.recall }}</div>
+                        <div class="label">Recall</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="value">{{ metrics.xgb.f1 }}</div>
+                        <div class="label">F1-Score</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- LSTM -->
+            <div style="background:#1e293b; border-radius:14px; border:1px solid #334155; padding:1.2rem;">
+                <h3 style="text-align:center; color:#a78bfa; margin-bottom:0.8rem; font-size:1.1rem;">🧠 LSTM</h3>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.6rem;">
+                    <div class="metric-card">
+                        <div class="value">{{ metrics.lstm.accuracy }}</div>
+                        <div class="label">Accuracy</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="value">{{ metrics.lstm.precision }}</div>
+                        <div class="label">Precision</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="value">{{ metrics.lstm.recall }}</div>
+                        <div class="label">Recall</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="value">{{ metrics.lstm.f1 }}</div>
+                        <div class="label">F1-Score</div>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- ── Raw Signals ───────────────────────────── -->
+        <div class="section">
+            <h2>📈 Raw vGRF Signals <span>Step 1 — Data Visualization</span></h2>
+            <div class="plot-grid">
+                <div class="plot-card">
+                    <img src="/output/raw_signal_healthy.png" alt="Healthy vGRF">
+                    <div class="caption">Healthy Control — Total vertical ground reaction force</div>
+                </div>
+                <div class="plot-card">
+                    <img src="/output/raw_signal_parkinson.png" alt="Parkinson vGRF">
+                    <div class="caption">Parkinson Patient — Total vertical ground reaction force</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ── Time-Series Analysis ──────────────────── -->
+        <div class="section">
+            <h2>🔬 Time-Series Analysis <span>Step 3 — ACF, ADF, Decomposition</span></h2>
+
+            <h3 style="color:#94a3b8; margin:1rem 0 0.5rem;">3a. Autocorrelation of Stride Intervals</h3>
+            <div class="plot-grid">
+                <div class="plot-card">
+                    <img src="/output/autocorrelation_healthy.png" alt="ACF Healthy">
+                    <div class="caption">Healthy — stride interval autocorrelation</div>
+                </div>
+                <div class="plot-card">
+                    <img src="/output/autocorrelation_parkinson.png" alt="ACF Parkinson">
+                    <div class="caption">Parkinson — stride interval autocorrelation</div>
+                </div>
+            </div>
+
+            <h3 style="color:#94a3b8; margin:1.5rem 0 0.5rem;">3b. Stationarity Check (ADF Test)</h3>
+            <div class="adf-grid">
+                {% for key, tag in [('adf_healthy', 'Healthy'), ('adf_parkinson', 'Parkinson')] %}
+                {% if metrics.get(key) %}
+                <div class="adf-card">
+                    <h3>{{ tag }}</h3>
+                    <table>
+                        <tr>
+                            <td>ADF Statistic</td>
+                            <td>{{ "%.4f"|format(metrics[key].adf_statistic) }}</td>
+                        </tr>
+                        <tr>
+                            <td>p-value</td>
+                            <td>{{ "%.6f"|format(metrics[key].p_value) }}</td>
+                        </tr>
+                        <tr>
+                            <td>Stationary?</td>
+                            <td>
+                                {% if metrics[key].is_stationary %}
+                                <span class="badge-yes">YES ✓</span>
+                                {% else %}
+                                <span class="badge-no">NO ✗</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                    </table>
+                </div>
+                {% endif %}
+                {% endfor %}
+            </div>
+
+            <h3 style="color:#94a3b8; margin:1.5rem 0 0.5rem;">3c. Trend & Seasonality Decomposition</h3>
+            <div class="plot-grid">
+                <div class="plot-card">
+                    <img src="/output/decomposition_healthy.png" alt="Decomposition Healthy">
+                    <div class="caption">Healthy — Observed, Trend, Seasonal, Residual</div>
+                </div>
+                <div class="plot-card">
+                    <img src="/output/decomposition_parkinson.png" alt="Decomposition Parkinson">
+                    <div class="caption">Parkinson — Observed, Trend, Seasonal, Residual</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ── ML Models ─────────────────────────────── -->
+        <div class="section">
+            <h2>🤖 Machine Learning Models <span>Step 4 — RF, XGBoost, LSTM</span></h2>
+            <div class="plot-grid">
+                <div class="plot-card">
+                    <img src="/output/model_comparison.png" alt="Model Comparison">
+                    <div class="caption">Accuracy, Precision, Recall, F1 across models</div>
+                </div>
+                <div class="plot-card">
+                    <img src="/output/feature_importance.png" alt="Feature Importance">
+                    <div class="caption">Random Forest — Gini feature importance</div>
+                </div>
+                <div class="plot-card">
+                    <img src="/output/confusion_matrix_rf.png" alt="RF CM">
+                    <div class="caption">Random Forest — Confusion Matrix</div>
+                </div>
+                <div class="plot-card">
+                    <img src="/output/confusion_matrix_xgb.png" alt="XGB CM">
+                    <div class="caption">XGBoost — Confusion Matrix</div>
+                </div>
+                <div class="plot-card">
+                    <img src="/output/confusion_matrix_lstm.png" alt="LSTM CM">
+                    <div class="caption">LSTM — Confusion Matrix</div>
+                </div>
+                <div class="plot-card">
+                    <img src="/output/lstm_training_history.png" alt="LSTM History">
+                    <div class="caption">LSTM — Training loss & accuracy curves</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ── Feature Comparison ────────────────────── -->
+        <div class="section">
+            <h2>📊 Gait Feature Analysis <span>Healthy vs Parkinson</span></h2>
+            <div class="plot-grid">
+                <div class="plot-card">
+                    <img src="/output/feature_comparison.png" alt="Feature Comparison">
+                    <div class="caption">Side-by-side box plots of all gait features</div>
+                </div>
+                <div class="plot-card">
+                    <img src="/output/risk_vs_variability.png" alt="Risk vs Variability">
+                    <div class="caption">Fall risk probability vs stride variability</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ── Walking Pattern Comparison ────────────── -->
+        <div class="section">
+            <h2>🚶 Walking Pattern Comparison <span>Slow vs Fast Gait</span></h2>
+            <div class="plot-grid">
+                <div class="plot-card">
+                    <img src="/output/walk_pattern_comparison.png" alt="Walk Patterns">
+                    <div class="caption">Gait features stratified by walking speed (cadence)</div>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <div class="footer">
+        Gait-Based Parkinson Detection &amp; Fall Risk Monitoring — Applied Time Series Analysis
+    </div>
+
+</body>
+
+</html>

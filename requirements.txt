@@ -3,3 +3,8 @@ pandas
 scipy
 scikit-learn
 matplotlib
+statsmodels
+xgboost
+tensorflow
+flask
+joblib

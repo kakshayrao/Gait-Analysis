@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Gait Monitoring — Fall Risk</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: #0f172a;
+            color: #e2e8f0;
+            line-height: 1.6;
+        }
+
+        /* ── Nav ─────────────────────────────────── */
+        .navbar {
+            background: linear-gradient(135deg, #1e293b, #0f172a);
+            border-bottom: 1px solid #334155;
+            padding: 1rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .navbar h1 {
+            font-size: 1.3rem;
+            background: linear-gradient(135deg, #f97316, #ef4444);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .navbar a {
+            color: #94a3b8;
+            text-decoration: none;
+            font-weight: 500;
+            padding: 0.4rem 1rem;
+            border-radius: 8px;
+            border: 1px solid #475569;
+        }
+
+        .navbar a:hover {
+            color: #e2e8f0;
+            border-color: #e2e8f0;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        /* ── Controls ────────────────────────────── */
+        .controls {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+            align-items: center;
+            margin-bottom: 2rem;
+        }
+
+        select,
+        button {
+            font-family: inherit;
+            font-size: 0.95rem;
+            padding: 0.6rem 1.2rem;
+            border-radius: 10px;
+            border: none;
+            cursor: pointer;
+        }
+
+        select {
+            background: #1e293b;
+            color: #e2e8f0;
+            border: 1px solid #475569;
+            min-width: 320px;
+        }
+
+        .btn-run {
+            background: linear-gradient(135deg, #22c55e, #16a34a);
+            color: #fff;
+            font-weight: 700;
+            transition: transform 0.15s;
+        }
+
+        .btn-run:hover {
+            transform: scale(1.05);
+        }
+
+        .btn-run:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .speed-control {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            color: #94a3b8;
+        }
+
+        .speed-control input {
+            width: 120px;
+        }
+
+        /* ── Risk Display ────────────────────────── */
+        .live-grid {
+            display: grid;
+            grid-template-columns: 1fr 200px;
+            gap: 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .chart-container {
+            background: #1e293b;
+            border-radius: 12px;
+            border: 1px solid #334155;
+            padding: 1.5rem;
+            min-height: 350px;
+            position: relative;
+        }
+
+        canvas {
+            width: 100% !important;
+            height: 300px !important;
+        }
+
+        .risk-bar-container {
+            background: #1e293b;
+            border-radius: 12px;
+            border: 1px solid #334155;
+            padding: 1.5rem;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .risk-bar-title {
+            color: #94a3b8;
+            font-size: 0.9rem;
+            margin-bottom: 1rem;
+        }
+
+        .risk-bar-track {
+            width: 60px;
+            height: 250px;
+            background: #334155;
+            border-radius: 30px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .risk-bar-fill {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            border-radius: 30px;
+            transition: height 0.3s, background 0.3s;
+        }
+
+        .risk-bar-value {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-top: 1rem;
+            font-family: monospace;
+        }
+
+        /* ── Alert Banner ────────────────────────── */
+        .alert-banner {
+            display: none;
+            position: fixed;
+            top: 5rem;
+            right: 2rem;
+            z-index: 999;
+            background: linear-gradient(135deg, #dc2626, #b91c1c);
+            color: #fff;
+            text-align: center;
+            padding: 1rem 1.5rem;
+            border-radius: 12px;
+            font-size: 1.1rem;
+            font-weight: 700;
+            animation: pulse 1s infinite;
+            box-shadow: 0 8px 30px rgba(220, 38, 38, 0.5);
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.7;
+            }
+        }
+
+        /* ── Stats ───────────────────────────────── */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 1rem;
+        }
+
+        .stat-card {
+            background: #1e293b;
+            border-radius: 10px;
+            border: 1px solid #334155;
+            padding: 1rem;
+            text-align: center;
+        }
+
+        .stat-card .val {
+            font-size: 1.6rem;
+            font-weight: 700;
+            font-family: monospace;
+            color: #38bdf8;
+        }
+
+        .stat-card .lbl {
+            font-size: 0.8rem;
+            color: #64748b;
+        }
+
+        /* ── Subject Info ────────────────────────── */
+        .subject-info {
+            background: #1e293b;
+            border-radius: 12px;
+            border: 1px solid #334155;
+            padding: 1rem 1.5rem;
+            margin-bottom: 1.5rem;
+            display: none;
+        }
+
+        .subject-info span {
+            margin-right: 2rem;
+        }
+
+        .tag-healthy {
+            background: #22c55e;
+            color: #052e16;
+            padding: 2px 12px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 0.85rem;
+        }
+
+        .tag-parkinson {
+            background: #ef4444;
+            color: #fff;
+            padding: 2px 12px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 0.85rem;
+        }
+
+        .loading {
+            color: #64748b;
+            text-align: center;
+            padding: 3rem;
+        }
+    </style>
+</head>
+
+<body>
+
+    <nav class="navbar">
+        <h1>⚡ Live Gait Monitoring</h1>
+        <a href="/">← Dashboard</a>
+    </nav>
+
+    <div class="container">
+
+        <!-- Controls -->
+        <div class="controls">
+            <select id="subjectSelect">
+                <option value="">— Select a subject —</option>
+            </select>
+            <button class="btn-run" id="runBtn" disabled onclick="startMonitoring()">
+                ▶ Run Live Monitoring
+            </button>
+            <div class="speed-control">
+                <label>Speed:</label>
+                <input type="range" id="speedSlider" min="1" max="50" value="10">
+                <span id="speedLabel">10x</span>
+            </div>
+        </div>
+
+        <!-- Subject Info -->
+        <div class="subject-info" id="subjectInfo">
+            <span><strong>File:</strong> <span id="infoFile"></span></span>
+            <span><strong>Type:</strong> <span id="infoType"></span></span>
+            <span><strong>Duration:</strong> <span id="infoDuration"></span>s</span>
+        </div>
+
+        <!-- Alert Banner -->
+        <div class="alert-banner" id="alertBanner">
+            ⚠️ HIGH FALL RISK DETECTED — Risk exceeds 0.75
+        </div>
+
+        <!-- Live Chart + Risk Bar -->
+        <div class="live-grid">
+            <div class="chart-container">
+                <canvas id="riskChart"></canvas>
+            </div>
+            <div class="risk-bar-container">
+                <div class="risk-bar-title">Current Risk</div>
+                <div class="risk-bar-track">
+                    <div class="risk-bar-fill" id="riskFill" style="height:0%;background:#22c55e;"></div>
+                </div>
+                <div class="risk-bar-value" id="riskValue" style="color:#22c55e;">0.00</div>
+            </div>
+        </div>
+
+        <!-- Stats -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="val" id="statMean">—</div>
+                <div class="lbl">Mean Risk</div>
+            </div>
+            <div class="stat-card">
+                <div class="val" id="statMax">—</div>
+                <div class="lbl">Peak Risk</div>
+            </div>
+            <div class="stat-card">
+                <div class="val" id="statAlerts">0</div>
+                <div class="lbl">Alerts</div>
+            </div>
+            <div class="stat-card">
+                <div class="val" id="statWindows">0</div>
+                <div class="lbl">Windows</div>
+            </div>
+            <div class="stat-card">
+                <div class="val" id="statProgress">0%</div>
+                <div class="lbl">Progress</div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Chart.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <script>
+        // ── State ───────────────────────────────────
+        let subjects = [];
+        let liveData = null;
+        let animFrame = null;
+        let chart = null;
+
+        // ── Load subjects on page load ──────────────
+        fetch('/api/subjects')
+            .then(r => r.json())
+            .then(data => {
+                subjects = data;
+                const sel = document.getElementById('subjectSelect');
+
+                // Group by label
+                const healthy = data.filter(s => s.label === 0);
+                const parkinson = data.filter(s => s.label === 1);
+
+                const grpH = document.createElement('optgroup');
+                grpH.label = `Healthy Controls (${healthy.length})`;
+                healthy.forEach(s => {
+                    const opt = document.createElement('option');
+                    opt.value = s.filename;
+                    opt.textContent = `${s.filename}  —  ${s.duration_s}s`;
+                    grpH.appendChild(opt);
+                });
+
+                const grpP = document.createElement('optgroup');
+                grpP.label = `Parkinson Patients (${parkinson.length})`;
+                parkinson.forEach(s => {
+                    const opt = document.createElement('option');
+                    opt.value = s.filename;
+                    opt.textContent = `${s.filename}  —  ${s.duration_s}s`;
+                    grpP.appendChild(opt);
+                });
+
+                sel.appendChild(grpH);
+                sel.appendChild(grpP);
+            });
+
+        document.getElementById('subjectSelect').addEventListener('change', e => {
+            document.getElementById('runBtn').disabled = !e.target.value;
+        });
+
+        document.getElementById('speedSlider').addEventListener('input', e => {
+            document.getElementById('speedLabel').textContent = e.target.value + 'x';
+        });
+
+        // ── Init Chart ──────────────────────────────
+        function initChart() {
+            const ctx = document.getElementById('riskChart').getContext('2d');
+            if (chart) chart.destroy();
+            chart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Fall Risk Probability',
+                        data: [],
+                        borderColor: '#38bdf8',
+                        backgroundColor: 'rgba(56,189,248,0.1)',
+                        fill: true, tension: 0.3, pointRadius: 0, borderWidth: 2,
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    animation: false,
+                    scales: {
+                        x: {
+                            title: { display: true, text: 'Time (s)', color: '#94a3b8' },
+                            ticks: { color: '#64748b', maxTicksLimit: 15 },
+                            grid: { color: '#1e293b' }
+                        },
+                        y: {
+                            min: 0, max: 1,
+                            title: { display: true, text: 'Risk', color: '#94a3b8' },
+                            ticks: { color: '#64748b' }, grid: { color: '#1e293b' }
+                        },
+                    },
+                    plugins: {
+                        legend: { labels: { color: '#94a3b8' } },
+                        annotation: {
+                            annotations: {
+                                highRisk: {
+                                    type: 'line', yMin: 0.75, yMax: 0.75,
+                                    borderColor: '#ef4444', borderDash: [6, 3], borderWidth: 1
+                                },
+                                modRisk: {
+                                    type: 'line', yMin: 0.4, yMax: 0.4,
+                                    borderColor: '#f97316', borderDash: [4, 4], borderWidth: 1
+                                },
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // ── Start Monitoring ────────────────────────
+        async function startMonitoring() {
+            const filename = document.getElementById('subjectSelect').value;
+            if (!filename) return;
+
+            document.getElementById('runBtn').disabled = true;
+            document.getElementById('runBtn').textContent = '⏳ Loading...';
+            document.getElementById('alertBanner').style.display = 'none';
+
+            // Fetch the pre-computed live data
+            const resp = await fetch(`/api/live/${filename}`);
+            liveData = await resp.json();
+
+            // Show subject info
+            const info = document.getElementById('subjectInfo');
+            info.style.display = 'block';
+            document.getElementById('infoFile').textContent = liveData.filename;
+            document.getElementById('infoDuration').textContent = liveData.duration_s;
+            const typeEl = document.getElementById('infoType');
+            typeEl.innerHTML = liveData.label === 'Healthy'
+                ? '<span class="tag-healthy">Healthy</span>'
+                : '<span class="tag-parkinson">Parkinson</span>';
+
+            document.getElementById('runBtn').textContent = '▶ Running...';
+
+            // Init chart and animate
+            initChart();
+            animateData(liveData.data);
+        }
+
+        // ── Animate Data Points ─────────────────────
+        function animateData(points) {
+            let idx = 0;
+            let alerts = 0;
+            let maxRisk = 0;
+            let sumRisk = 0;
+
+            function step() {
+                const speed = parseInt(document.getElementById('speedSlider').value);
+                const batch = Math.max(1, speed);
+
+                for (let b = 0; b < batch && idx < points.length; b++, idx++) {
+                    const pt = points[idx];
+                    chart.data.labels.push(pt.time.toFixed(1));
+                    chart.data.datasets[0].data.push(pt.risk);
+
+                    sumRisk += pt.risk;
+                    if (pt.risk > maxRisk) maxRisk = pt.risk;
+                    if (pt.risk > 0.75) alerts++;
+
+                    // Update risk bar
+                    updateRiskBar(pt.risk);
+
+                    // Alert
+                    if (pt.risk > 0.75) {
+                        document.getElementById('alertBanner').style.display = 'block';
+                    } else {
+                        document.getElementById('alertBanner').style.display = 'none';
+                    }
+                }
+
+                chart.update();
+
+                // Stats
+                const mean = idx > 0 ? sumRisk / idx : 0;
+                document.getElementById('statMean').textContent = mean.toFixed(3);
+                document.getElementById('statMax').textContent = maxRisk.toFixed(3);
+                document.getElementById('statAlerts').textContent = alerts;
+                document.getElementById('statWindows').textContent = idx;
+                document.getElementById('statProgress').textContent =
+                    Math.round(idx / points.length * 100) + '%';
+
+                if (idx < points.length) {
+                    animFrame = setTimeout(step, 50);
+                } else {
+                    document.getElementById('runBtn').textContent = '▶ Run Live Monitoring';
+                    document.getElementById('runBtn').disabled = false;
+                }
+            }
+
+            step();
+        }
+
+        function updateRiskBar(risk) {
+            const fill = document.getElementById('riskFill');
+            const val = document.getElementById('riskValue');
+            const pct = Math.round(risk * 100);
+            fill.style.height = pct + '%';
+
+            let color;
+            if (risk < 0.4) color = '#22c55e';
+            else if (risk < 0.7) color = '#f97316';
+            else color = '#ef4444';
+
+            fill.style.background = color;
+            val.style.color = color;
+            val.textContent = risk.toFixed(2);
+        }
+
+        // Init empty chart
+        initChart();
+    </script>
+</body>
+
+</html>
