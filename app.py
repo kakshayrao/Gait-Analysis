@@ -16,7 +16,7 @@ import joblib
 import matplotlib
 matplotlib.use("Agg")
 
-from flask import Flask, render_template, jsonify, send_from_directory
+from flask import Flask, render_template, jsonify, send_from_directory, request
 
 from src.data_loader import load_all_subjects
 from src.feature_extraction import (
@@ -43,6 +43,7 @@ app = Flask(__name__, static_folder="output", static_url_path="/output")
 # ── Globals (loaded once at startup) ─────────────────────────────────────────
 subjects = []
 rf_model = None
+xgb_model = None
 feature_names = []
 features_df = None
 metrics_data = {}
@@ -50,7 +51,7 @@ metrics_data = {}
 
 def startup():
     """Load data, train model (or load cached), and prepare metrics."""
-    global subjects, rf_model, feature_names, features_df, metrics_data
+    global subjects, rf_model, xgb_model, feature_names, features_df, metrics_data
 
     print("Loading subjects...")
     subjects[:] = load_all_subjects(DATA_DIR)
@@ -97,7 +98,7 @@ def startup():
     from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
     from xgboost import XGBClassifier
 
-    feature_cols = [c for c in features_df.columns if c != "label"]
+    feature_cols = [c for c in features_df.columns if c not in ("label", "subject_id")]
     X = features_df[feature_cols].values
     y = features_df["label"].values
     X_train, X_test, y_train, y_test = train_test_split(
@@ -116,35 +117,22 @@ def startup():
     y_pred_rf = rf_model.predict(X_test)
     metrics_data["rf"] = _metrics(y_test, y_pred_rf)
 
-    # XGBoost
-    xgb = XGBClassifier(n_estimators=100, max_depth=6, learning_rate=0.1,
+    # XGBoost — store globally for live monitoring
+    xgb_model = XGBClassifier(n_estimators=100, max_depth=6, learning_rate=0.1,
                         eval_metric="logloss", random_state=42, verbosity=0)
-    xgb.fit(X_train, y_train)
-    y_pred_xgb = xgb.predict(X_test)
+    xgb_model.fit(X_train, y_train)
+    y_pred_xgb = xgb_model.predict(X_test)
     metrics_data["xgb"] = _metrics(y_test, y_pred_xgb)
 
-    # LSTM
+    # LSTM — use the proper sequence-based training from model.py
     try:
-        import tensorflow as tf
-        tf.get_logger().setLevel("ERROR")
-        from tensorflow.keras.models import Sequential
-        from tensorflow.keras.layers import LSTM as LSTMLayer, Dense, Dropout
-        from tensorflow.keras.callbacks import EarlyStopping
-
-        X_train_seq = X_train.reshape((X_train.shape[0], 1, X_train.shape[1]))
-        X_test_seq  = X_test.reshape((X_test.shape[0], 1, X_test.shape[1]))
-        lstm = Sequential([
-            LSTMLayer(64, input_shape=(1, len(feature_cols))),
-            Dropout(0.3), Dense(32, activation="relu"),
-            Dropout(0.2), Dense(1, activation="sigmoid"),
-        ])
-        lstm.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
-        lstm.fit(X_train_seq, y_train, epochs=30, batch_size=64,
-                 validation_split=0.15,
-                 callbacks=[EarlyStopping(patience=5, restore_best_weights=True)],
-                 verbose=0)
-        y_pred_lstm = (lstm.predict(X_test_seq, verbose=0).flatten() >= 0.5).astype(int)
-        metrics_data["lstm"] = _metrics(y_test, y_pred_lstm)
+        lstm_result = train_lstm(features_df, OUTPUT_DIR)
+        metrics_data["lstm"] = {
+            "accuracy":  round(lstm_result["accuracy"], 4),
+            "precision": round(lstm_result["precision"], 4),
+            "recall":    round(lstm_result["recall"], 4),
+            "f1":        round(lstm_result["f1"], 4),
+        }
     except Exception as e:
         print(f"  [WARN] LSTM metrics skipped: {e}")
         metrics_data["lstm"] = {"accuracy": "—", "precision": "—", "recall": "—", "f1": "—"}
@@ -193,8 +181,14 @@ def get_subjects():
 def run_live(filename):
     """
     Run live monitoring simulation for a specific subject.
+    Accepts ?model=rf|xgb query param (default: rf).
     Returns JSON array of (time, risk_probability) pairs.
     """
+    model_choice = request.args.get("model", "rf")
+    model = rf_model if model_choice != "xgb" else xgb_model
+    if model is None:
+        return jsonify({"error": f"Model '{model_choice}' not available"}), 400
+
     # Find the subject
     subj = next((s for s in subjects if s[2] == filename), None)
     if subj is None:
@@ -221,7 +215,7 @@ def run_live(filename):
             continue
 
         x = np.array([[feats[f] for f in feature_names]])
-        prob = float(rf_model.predict_proba(x)[0][1])
+        prob = float(model.predict_proba(x)[0][1])
         centre_time = round((i + window_size / 2) / FS, 2)
 
         results.append({
@@ -230,9 +224,11 @@ def run_live(filename):
         })
 
     label_name = "Healthy" if label == 0 else "Parkinson"
+    model_name = "Random Forest" if model_choice == "rf" else "XGBoost"
     return jsonify({
         "filename": fname,
         "label": label_name,
+        "model": model_name,
         "duration_s": round(len(df) / FS, 1),
         "data": results,
     })

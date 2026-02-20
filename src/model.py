@@ -81,7 +81,7 @@ def train_and_evaluate(features_df: pd.DataFrame,
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    feature_cols = [c for c in features_df.columns if c != "label"]
+    feature_cols = [c for c in features_df.columns if c not in ("label", "subject_id")]
     X = features_df[feature_cols].values
     y = features_df["label"].values
 
@@ -164,65 +164,97 @@ def _get_metrics(y_true, y_pred):
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. LSTM  (sequence modeling)
 # ─────────────────────────────────────────────────────────────────────────────
-def train_lstm(features_df: pd.DataFrame, output_dir: str = "output"):
+def train_lstm(features_df: pd.DataFrame, output_dir: str = "output",
+               seq_len: int = 10):
     """
-    Train a simple LSTM model that treats each feature window as a
-    single-timestep sequence.
+    Train an LSTM on temporal sequences of gait features.
 
-    The LSTM receives the 7 gait features as a (1, 7) shaped input
-    per sample, demonstrating sequence modeling capability.
+    Groups consecutive windows from each subject into sequences of length
+    `seq_len`, scales features with StandardScaler, and uses a stacked
+    2-layer LSTM for binary PD classification.
     """
     os.makedirs(output_dir, exist_ok=True)
 
     # Lazy import to avoid slow TF startup if not needed
     import tensorflow as tf
     from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import LSTM, Dense, Dropout
+    from tensorflow.keras.layers import LSTM, Dense, Dropout, BatchNormalization
     from tensorflow.keras.callbacks import EarlyStopping
+    from sklearn.preprocessing import StandardScaler
 
     # Suppress TF warnings
     tf.get_logger().setLevel("ERROR")
 
-    feature_cols = [c for c in features_df.columns if c != "label"]
-    X = features_df[feature_cols].values
-    y = features_df["label"].values
+    feature_cols = [c for c in features_df.columns
+                    if c not in ("label", "subject_id")]
 
+    # ── Build sequences per subject ──────────────────────────────────────
+    sequences, labels = [], []
+    for sid, grp in features_df.groupby("subject_id", sort=False):
+        X_subj = grp[feature_cols].values
+        y_subj = grp["label"].values[0]
+        for i in range(len(X_subj) - seq_len + 1):
+            sequences.append(X_subj[i : i + seq_len])
+            labels.append(y_subj)
+
+    X_all = np.array(sequences, dtype=np.float32)   # (N, seq_len, 7)
+    y_all = np.array(labels, dtype=np.int32)
+
+    print(f"\n  LSTM sequences: {X_all.shape[0]}  "
+          f"(shape per sample: {X_all.shape[1]}×{X_all.shape[2]})")
+
+    # ── Stratified split (same approach as RF/XGBoost) ───────────────────
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, stratify=y, random_state=42
+        X_all, y_all, test_size=0.2, stratify=y_all, random_state=42
     )
 
-    # Reshape for LSTM: (samples, timesteps=1, features)
-    X_train_seq = X_train.reshape((X_train.shape[0], 1, X_train.shape[1]))
-    X_test_seq  = X_test.reshape((X_test.shape[0], 1, X_test.shape[1]))
+    # ── Scale features (fit on train only) ───────────────────────────────
+    n_feat = X_train.shape[2]
+    scaler = StandardScaler()
+    # Reshape to 2D for fitting, then reshape back
+    scaler.fit(X_train.reshape(-1, n_feat))
+    X_train = scaler.transform(X_train.reshape(-1, n_feat)).reshape(X_train.shape)
+    X_test  = scaler.transform(X_test.reshape(-1, n_feat)).reshape(X_test.shape)
+
+    # Class weights to handle imbalance
+    n_neg = (y_train == 0).sum()
+    n_pos = (y_train == 1).sum()
+    total = n_neg + n_pos
+    class_weight = {0: total / (2 * n_neg), 1: total / (2 * n_pos)}
+    print(f"  Class weights: {class_weight}")
 
     # ── Build LSTM Model ─────────────────────────────────────────────────
     model = Sequential([
-        LSTM(64, input_shape=(1, len(feature_cols)),
-             return_sequences=False),
+        LSTM(128, input_shape=(seq_len, len(feature_cols)),
+             return_sequences=True),
+        Dropout(0.3),
+        LSTM(64, return_sequences=False),
         Dropout(0.3),
         Dense(32, activation="relu"),
+        BatchNormalization(),
         Dropout(0.2),
         Dense(1, activation="sigmoid"),
     ])
 
     model.compile(
-        optimizer="adam",
+        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
         loss="binary_crossentropy",
         metrics=["accuracy"],
     )
 
-    print("\n  Training LSTM model...")
+    print("  Training LSTM model...")
     history = model.fit(
-        X_train_seq, y_train,
-        epochs=30,
+        X_train, y_train,
+        epochs=50,
         batch_size=64,
         validation_split=0.15,
-        callbacks=[EarlyStopping(patience=5, restore_best_weights=True)],
+        class_weight=class_weight,
+        callbacks=[EarlyStopping(patience=8, restore_best_weights=True)],
         verbose=0,
     )
 
     # ── Evaluate ─────────────────────────────────────────────────────────
-    y_prob = model.predict(X_test_seq, verbose=0).flatten()
+    y_prob = model.predict(X_test, verbose=0).flatten()
     y_pred = (y_prob >= 0.5).astype(int)
 
     metrics = _print_metrics("LSTM", y_test, y_pred)

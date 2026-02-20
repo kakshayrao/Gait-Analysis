@@ -156,6 +156,7 @@ def build_feature_dataframe(subjects: list,
             feats = compute_window_features(lw, rw, tw, fs)
             if feats is not None:
                 feats["label"] = label
+                feats["subject_id"] = fname
                 rows.append(feats)
 
     feature_df = pd.DataFrame(rows)

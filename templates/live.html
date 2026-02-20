@@ -284,6 +284,10 @@
             <select id="subjectSelect">
                 <option value="">— Select a subject —</option>
             </select>
+            <select id="modelSelect" style="min-width:180px;">
+                <option value="rf">🌲 Random Forest</option>
+                <option value="xgb">⚡ XGBoost</option>
+            </select>
             <button class="btn-run" id="runBtn" disabled onclick="startMonitoring()">
                 ▶ Run Live Monitoring
             </button>
@@ -298,6 +302,7 @@
         <div class="subject-info" id="subjectInfo">
             <span><strong>File:</strong> <span id="infoFile"></span></span>
             <span><strong>Type:</strong> <span id="infoType"></span></span>
+            <span><strong>Model:</strong> <span id="infoModel"></span></span>
             <span><strong>Duration:</strong> <span id="infoDuration"></span>s</span>
         </div>
 
@@ -455,8 +460,9 @@
             document.getElementById('runBtn').textContent = '⏳ Loading...';
             document.getElementById('alertBanner').style.display = 'none';
 
-            // Fetch the pre-computed live data
-            const resp = await fetch(`/api/live/${filename}`);
+            // Fetch the pre-computed live data with selected model
+            const model = document.getElementById('modelSelect').value;
+            const resp = await fetch(`/api/live/${filename}?model=${model}`);
             liveData = await resp.json();
 
             // Show subject info
@@ -464,6 +470,7 @@
             info.style.display = 'block';
             document.getElementById('infoFile').textContent = liveData.filename;
             document.getElementById('infoDuration').textContent = liveData.duration_s;
+            document.getElementById('infoModel').textContent = liveData.model || 'Random Forest';
             const typeEl = document.getElementById('infoType');
             typeEl.innerHTML = liveData.label === 'Healthy'
                 ? '<span class="tag-healthy">Healthy</span>'
