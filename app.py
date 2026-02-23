@@ -44,6 +44,9 @@ app = Flask(__name__, static_folder="output", static_url_path="/output")
 subjects = []
 rf_model = None
 xgb_model = None
+lstm_model = None
+lstm_scaler = None
+lstm_seq_len = 10
 feature_names = []
 features_df = None
 metrics_data = {}
@@ -51,7 +54,7 @@ metrics_data = {}
 
 def startup():
     """Load data, train model (or load cached), and prepare metrics."""
-    global subjects, rf_model, xgb_model, feature_names, features_df, metrics_data
+    global subjects, rf_model, xgb_model, lstm_model, lstm_scaler, lstm_seq_len, feature_names, features_df, metrics_data
 
     print("Loading subjects...")
     subjects[:] = load_all_subjects(DATA_DIR)
@@ -127,6 +130,9 @@ def startup():
     # LSTM — use the proper sequence-based training from model.py
     try:
         lstm_result = train_lstm(features_df, OUTPUT_DIR)
+        lstm_model = lstm_result["model"]
+        lstm_scaler = lstm_result["scaler"]
+        lstm_seq_len = lstm_result["seq_len"]
         metrics_data["lstm"] = {
             "accuracy":  round(lstm_result["accuracy"], 4),
             "precision": round(lstm_result["precision"], 4),
@@ -181,13 +187,20 @@ def get_subjects():
 def run_live(filename):
     """
     Run live monitoring simulation for a specific subject.
-    Accepts ?model=rf|xgb query param (default: rf).
+    Accepts ?model=rf|xgb|lstm query param (default: rf).
     Returns JSON array of (time, risk_probability) pairs.
     """
     model_choice = request.args.get("model", "rf")
-    model = rf_model if model_choice != "xgb" else xgb_model
-    if model is None:
-        return jsonify({"error": f"Model '{model_choice}' not available"}), 400
+
+    if model_choice == "lstm":
+        if lstm_model is None:
+            return jsonify({"error": "LSTM model not available"}), 400
+    elif model_choice == "xgb":
+        if xgb_model is None:
+            return jsonify({"error": "XGBoost model not available"}), 400
+    else:
+        if rf_model is None:
+            return jsonify({"error": "Random Forest model not available"}), 400
 
     # Find the subject
     subj = next((s for s in subjects if s[2] == filename), None)
@@ -205,30 +218,64 @@ def run_live(filename):
     step = 50
     results = []
 
-    for i in range(0, len(total) - window_size + 1, step):
-        lw = left[i : i + window_size]
-        rw = right[i : i + window_size]
-        tw = total[i : i + window_size]
+    if model_choice == "lstm":
+        # ── LSTM path: collect features, build sequences, predict ────────
+        all_feats = []
+        all_times = []
+        for i in range(0, len(total) - window_size + 1, step):
+            lw = left[i : i + window_size]
+            rw = right[i : i + window_size]
+            tw = total[i : i + window_size]
 
-        feats = compute_window_features(lw, rw, tw, FS)
-        if feats is None:
-            continue
+            feats = compute_window_features(lw, rw, tw, FS)
+            if feats is None:
+                continue
+            all_feats.append([feats[f] for f in feature_names])
+            all_times.append(round((i + window_size / 2) / FS, 2))
 
-        x = np.array([[feats[f] for f in feature_names]])
-        prob = float(model.predict_proba(x)[0][1])
-        centre_time = round((i + window_size / 2) / FS, 2)
+        # Build sliding sequences of length lstm_seq_len
+        if len(all_feats) >= lstm_seq_len:
+            feat_array = np.array(all_feats, dtype=np.float32)
+            # Scale using the same scaler used during training
+            feat_scaled = lstm_scaler.transform(feat_array)
 
-        results.append({
-            "time": centre_time,
-            "risk": round(prob, 4),
-        })
+            for j in range(len(feat_scaled) - lstm_seq_len + 1):
+                seq = feat_scaled[j : j + lstm_seq_len]
+                seq_input = seq.reshape(1, lstm_seq_len, -1)
+                prob = float(lstm_model.predict(seq_input, verbose=0)[0][0])
+                # Use the centre time of the last window in the sequence
+                centre_time = all_times[j + lstm_seq_len - 1]
+                results.append({
+                    "time": centre_time,
+                    "risk": round(prob, 4),
+                })
+    else:
+        # ── RF / XGBoost path ────────────────────────────────────────────
+        model = rf_model if model_choice == "rf" else xgb_model
+        for i in range(0, len(total) - window_size + 1, step):
+            lw = left[i : i + window_size]
+            rw = right[i : i + window_size]
+            tw = total[i : i + window_size]
+
+            feats = compute_window_features(lw, rw, tw, FS)
+            if feats is None:
+                continue
+
+            x = np.array([[feats[f] for f in feature_names]])
+            prob = float(model.predict_proba(x)[0][1])
+            centre_time = round((i + window_size / 2) / FS, 2)
+
+            results.append({
+                "time": centre_time,
+                "risk": round(prob, 4),
+            })
 
     label_name = "Healthy" if label == 0 else "Parkinson"
-    model_name = "Random Forest" if model_choice == "rf" else "XGBoost"
+    model_names = {"rf": "Random Forest", "xgb": "XGBoost", "lstm": "LSTM"}
     return jsonify({
         "filename": fname,
         "label": label_name,
-        "model": model_name,
+        "model": model_names.get(model_choice, "Random Forest"),
         "duration_s": round(len(df) / FS, 1),
         "data": results,
     })

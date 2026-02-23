@@ -285,6 +285,9 @@ def train_lstm(features_df: pd.DataFrame, output_dir: str = "output",
     plt.close()
     print(f"  → Saved lstm_training_history.png")
 
+    metrics["model"] = model
+    metrics["scaler"] = scaler
+    metrics["seq_len"] = seq_len
     return metrics
 
 
