@@ -6,23 +6,39 @@
 #   2. XGBoost         (gradient boosting, high accuracy)
 #   3. LSTM            (sequence modeling via Keras)
 #
+# Key design choices
+# ------------------
+#   - GroupShuffleSplit by subject_id prevents data leakage
+#   - Class-weight balancing handles Healthy / PD imbalance
+#   - LSTM model + scaler + metrics are persisted to disk
+#
 # Outputs
 # -------
 #   - Console : Accuracy, Precision, Recall, F1-score for each model
-#   - Plots   : Confusion matrices, Feature importance  (saved to output/)
+#   - Plots   : Confusion matrices, learning curves, model comparison
+#   - Files   : lstm_model.keras, lstm_scaler.joblib, lstm_metrics.json
 # =============================================================================
 
 import os
+import json
 import warnings
 import numpy as np
 import pandas as pd
+import joblib
 import matplotlib
 matplotlib.use("Agg")  # non-interactive backend for saving plots
 import matplotlib.pyplot as plt
 
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GroupShuffleSplit, learning_curve
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import (accuracy_score,precision_score,recall_score,f1_score,confusion_matrix,ConfusionMatrixDisplay)
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    confusion_matrix,
+    ConfusionMatrixDisplay,
+)
 
 # XGBoost
 from xgboost import XGBClassifier
@@ -31,18 +47,18 @@ from xgboost import XGBClassifier
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Helper: print metrics for any model
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 def _print_metrics(name, y_true, y_pred):
     """Print classification metrics for a named model."""
     acc  = accuracy_score(y_true, y_pred)
     prec = precision_score(y_true, y_pred, zero_division=0)
     rec  = recall_score(y_true, y_pred, zero_division=0)
     f1   = f1_score(y_true, y_pred, zero_division=0)
-    print(f"\n  {'─' * 44}")
+    print(f"\n  {'-' * 44}")
     print(f"  {name}")
-    print(f"  {'─' * 44}")
+    print(f"  {'-' * 44}")
     print(f"  Accuracy  : {acc:.4f}")
     print(f"  Precision : {prec:.4f}")
     print(f"  Recall    : {rec:.4f}")
@@ -59,20 +75,49 @@ def _plot_confusion(name, y_true, y_pred, output_dir, filename):
         display_labels=["Healthy", "Parkinson"],
     )
     disp.plot(ax=ax, cmap="Blues", colorbar=False)
-    ax.set_title(f"Confusion Matrix — {name}", fontsize=14, fontweight="bold")
+    ax.set_title(f"Confusion Matrix -- {name}", fontsize=14, fontweight="bold")
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, filename), dpi=150)
     plt.close()
-    print(f"  → Saved {filename}")
+    print(f"  -> Saved {filename}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 1. RANDOM FOREST + XGBOOST  (traditional ML)
-# ─────────────────────────────────────────────────────────────────────────────
+def _get_metrics(y_true, y_pred):
+    return {
+        "Accuracy":  accuracy_score(y_true, y_pred),
+        "Precision": precision_score(y_true, y_pred, zero_division=0),
+        "Recall":    recall_score(y_true, y_pred, zero_division=0),
+        "F1":        f1_score(y_true, y_pred, zero_division=0),
+    }
+
+
+def _subject_split(features_df, feature_cols, test_size=0.2, random_state=42):
+    """
+    Split data by subject_id so that no subject appears in both train
+    and test sets.  This prevents data-leakage that inflates metrics.
+    """
+    X = features_df[feature_cols].values
+    y = features_df["label"].values
+    groups = features_df["subject_id"].values
+
+    gss = GroupShuffleSplit(n_splits=1, test_size=test_size,
+                           random_state=random_state)
+    train_idx, test_idx = next(gss.split(X, y, groups))
+
+    return (X[train_idx], X[test_idx],
+            y[train_idx], y[test_idx])
+
+
+# -----------------------------------------------------------------------------
+# 1. RANDOM FOREST + XGBOOST  (traditional ML -- improved)
+# -----------------------------------------------------------------------------
 def train_and_evaluate(features_df: pd.DataFrame,
                        output_dir: str = "output"):
     """
     Train Random Forest and XGBoost on the feature DataFrame.
+
+    Uses GroupShuffleSplit by subject_id to prevent data leakage and
+    class_weight balancing to handle class imbalance.
 
     Returns
     -------
@@ -81,16 +126,33 @@ def train_and_evaluate(features_df: pd.DataFrame,
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    feature_cols = [c for c in features_df.columns if c not in ("label", "subject_id")]
-    X = features_df[feature_cols].values
-    y = features_df["label"].values
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, stratify=y, random_state=42
+    feature_cols = [c for c in features_df.columns
+                    if c not in ("label", "subject_id")]
+    X_train, X_test, y_train, y_test = _subject_split(
+        features_df, feature_cols
     )
 
-    # ── Random Forest ────────────────────────────────────────────────────
-    rf = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
+    # Class weight ratio for XGBoost
+    n_neg = (y_train == 0).sum()
+    n_pos = (y_train == 1).sum()
+    scale_pos = n_neg / n_pos if n_pos > 0 else 1.0
+
+    print(f"\n  Train: {len(X_train)}  Test: {len(X_test)}  "
+          f"(subject-level split -- no data leakage)")
+    print(f"  Class balance -> Healthy: {n_neg}  Parkinson: {n_pos}  "
+          f"(scale_pos_weight={scale_pos:.2f})")
+
+    # -- Random Forest ----------------------------------------------------
+    rf = RandomForestClassifier(
+        n_estimators=500,
+        max_depth=None,
+        min_samples_split=3,
+        min_samples_leaf=1,
+        max_features="sqrt",
+        class_weight="balanced",
+        random_state=42,
+        n_jobs=-1,
+    )
     rf.fit(X_train, y_train)
     rf_pred = rf.predict(X_test)
 
@@ -101,12 +163,18 @@ def train_and_evaluate(features_df: pd.DataFrame,
     _plot_confusion("Random Forest", y_test, rf_pred, output_dir,
                     "confusion_matrix_rf.png")
 
-    # ── XGBoost ──────────────────────────────────────────────────────────
+    # -- XGBoost ----------------------------------------------------------
     xgb = XGBClassifier(
-        n_estimators=100,
-        max_depth=6,
+        n_estimators=500,
+        max_depth=8,
         learning_rate=0.1,
-        use_label_encoder=False,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_weight=2,
+        gamma=0.05,
+        reg_alpha=0.05,
+        reg_lambda=1.0,
+        scale_pos_weight=scale_pos,
         eval_metric="logloss",
         random_state=42,
         verbosity=0,
@@ -119,60 +187,80 @@ def train_and_evaluate(features_df: pd.DataFrame,
                     "confusion_matrix_xgb.png")
     print("=" * 50)
 
-    # ── Feature Importance (Random Forest) ───────────────────────────────
-    importances = rf.feature_importances_
-    sorted_idx  = np.argsort(importances)
-    fig, ax = plt.subplots(figsize=(7, 5))
-    ax.barh(
-        [feature_cols[i] for i in sorted_idx],
-        importances[sorted_idx],
-        color="#4C72B0",
-    )
-    ax.set_xlabel("Importance (Gini)")
-    ax.set_title("Feature Importance — Random Forest",
-                 fontsize=14, fontweight="bold")
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "feature_importance.png"), dpi=150)
-    plt.close()
-    print(f"  → Saved feature_importance.png")
+    # -- Save models ------------------------------------------------------
+    joblib.dump(rf, os.path.join(output_dir, "rf_model.pkl"))
+    joblib.dump(xgb, os.path.join(output_dir, "xgb_model.pkl"))
+    with open(os.path.join(output_dir, "feature_names.json"), "w") as f:
+        json.dump(list(feature_cols), f)
+    print("  -> Saved rf_model.pkl, xgb_model.pkl, feature_names.json")
 
-    # ── Feature Comparison: Healthy vs Parkinson ─────────────────────────
-    _plot_feature_comparison(features_df, feature_cols, output_dir)
-
-    # ── Risk vs Variability scatter ──────────────────────────────────────
-    _plot_risk_vs_variability(rf, features_df, feature_cols, output_dir)
-
-    # ── Model Comparison Bar Chart ───────────────────────────────────────
-    _plot_model_comparison(
-        {"Random Forest": _get_metrics(y_test, rf_pred),
-         "XGBoost":       _get_metrics(y_test, xgb_pred)},
-        output_dir,
-    )
+    # -- Learning Curves (RF + XGBoost) -----------------------------------
+    _plot_learning_curves(rf, xgb, X_train, y_train,
+                          features_df["subject_id"].values,
+                          feature_cols, features_df, output_dir)
 
     return rf, feature_cols
 
 
-def _get_metrics(y_true, y_pred):
-    return {
-        "Accuracy":  accuracy_score(y_true, y_pred),
-        "Precision": precision_score(y_true, y_pred, zero_division=0),
-        "Recall":    recall_score(y_true, y_pred, zero_division=0),
-        "F1":        f1_score(y_true, y_pred, zero_division=0),
-    }
+# -----------------------------------------------------------------------------
+# 2. LSTM  (sequence modeling -- with persistence)
+# -----------------------------------------------------------------------------
+LSTM_MODEL_PATH  = os.path.join("output", "lstm_model.keras")
+LSTM_SCALER_PATH = os.path.join("output", "lstm_scaler.joblib")
+LSTM_METRICS_PATH = os.path.join("output", "lstm_metrics.json")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. LSTM  (sequence modeling)
-# ─────────────────────────────────────────────────────────────────────────────
+def load_cached_lstm():
+    """
+    Attempt to load a previously-trained LSTM model, scaler, and metrics.
+
+    Returns
+    -------
+    dict with keys model, scaler, seq_len, accuracy, precision, recall, f1
+    or None if files are missing.
+    """
+    if (os.path.exists(LSTM_MODEL_PATH)
+            and os.path.exists(LSTM_SCALER_PATH)
+            and os.path.exists(LSTM_METRICS_PATH)):
+        import tensorflow as tf
+        tf.get_logger().setLevel("ERROR")
+
+        model  = tf.keras.models.load_model(LSTM_MODEL_PATH)
+        scaler = joblib.load(LSTM_SCALER_PATH)
+        with open(LSTM_METRICS_PATH) as f:
+            saved = json.load(f)
+
+        print("  [OK] Loaded cached LSTM model from disk")
+        return {
+            "model":     model,
+            "scaler":    scaler,
+            "seq_len":   saved.get("seq_len", 10),
+            "accuracy":  saved["accuracy"],
+            "precision": saved["precision"],
+            "recall":    saved["recall"],
+            "f1":        saved["f1"],
+        }
+    return None
+
+
 def train_lstm(features_df: pd.DataFrame, output_dir: str = "output",
-               seq_len: int = 10):
+               seq_len: int = 10, force_retrain: bool = False):
     """
     Train an LSTM on temporal sequences of gait features.
 
     Groups consecutive windows from each subject into sequences of length
     `seq_len`, scales features with StandardScaler, and uses a stacked
     2-layer LSTM for binary PD classification.
+
+    The trained model, scaler, and metrics are saved to disk so that
+    subsequent runs can skip training.
     """
+    # -- Try loading from cache first -------------------------------------
+    if not force_retrain:
+        cached = load_cached_lstm()
+        if cached is not None:
+            return cached
+
     os.makedirs(output_dir, exist_ok=True)
 
     # Lazy import to avoid slow TF startup if not needed
@@ -188,30 +276,36 @@ def train_lstm(features_df: pd.DataFrame, output_dir: str = "output",
     feature_cols = [c for c in features_df.columns
                     if c not in ("label", "subject_id")]
 
-    # ── Build sequences per subject ──────────────────────────────────────
-    sequences, labels = [], []
+    # -- Build sequences per subject --------------------------------------
+    # Track which subject each sequence belongs to for subject-level split
+    sequences, labels, seq_subjects = [], [], []
     for sid, grp in features_df.groupby("subject_id", sort=False):
         X_subj = grp[feature_cols].values
         y_subj = grp["label"].values[0]
         for i in range(len(X_subj) - seq_len + 1):
             sequences.append(X_subj[i : i + seq_len])
             labels.append(y_subj)
+            seq_subjects.append(sid)
 
-    X_all = np.array(sequences, dtype=np.float32)   # (N, seq_len, 7)
+    X_all = np.array(sequences, dtype=np.float32)
     y_all = np.array(labels, dtype=np.int32)
+    groups_all = np.array(seq_subjects)
 
     print(f"\n  LSTM sequences: {X_all.shape[0]}  "
-          f"(shape per sample: {X_all.shape[1]}×{X_all.shape[2]})")
+          f"(shape per sample: {X_all.shape[1]}x{X_all.shape[2]})")
 
-    # ── Stratified split (same approach as RF/XGBoost) ───────────────────
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_all, y_all, test_size=0.2, stratify=y_all, random_state=42
-    )
+    # -- Subject-level split (same as RF/XGBoost -- no data leakage) ------
+    gss = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+    train_idx, test_idx = next(gss.split(X_all, y_all, groups_all))
+    X_train, X_test = X_all[train_idx], X_all[test_idx]
+    y_train, y_test = y_all[train_idx], y_all[test_idx]
 
-    # ── Scale features (fit on train only) ───────────────────────────────
+    print(f"  Train: {len(X_train)}  Test: {len(X_test)}  "
+          f"(subject-level split -- no data leakage)")
+
+    # -- Scale features (fit on train only) -------------------------------
     n_feat = X_train.shape[2]
     scaler = StandardScaler()
-    # Reshape to 2D for fitting, then reshape back
     scaler.fit(X_train.reshape(-1, n_feat))
     X_train = scaler.transform(X_train.reshape(-1, n_feat)).reshape(X_train.shape)
     X_test  = scaler.transform(X_test.reshape(-1, n_feat)).reshape(X_test.shape)
@@ -223,16 +317,18 @@ def train_lstm(features_df: pd.DataFrame, output_dir: str = "output",
     class_weight = {0: total / (2 * n_neg), 1: total / (2 * n_pos)}
     print(f"  Class weights: {class_weight}")
 
-    # ── Build LSTM Model ─────────────────────────────────────────────────
+    # -- Build LSTM Model (moderate regularization to prevent overfitting) -
+    from tensorflow.keras.regularizers import l2
+
     model = Sequential([
-        LSTM(128, input_shape=(seq_len, len(feature_cols)),
-             return_sequences=True),
+        LSTM(96, input_shape=(seq_len, len(feature_cols)),
+             return_sequences=True, kernel_regularizer=l2(0.001)),
         Dropout(0.3),
-        LSTM(64, return_sequences=False),
+        LSTM(48, return_sequences=False, kernel_regularizer=l2(0.001)),
         Dropout(0.3),
-        Dense(32, activation="relu"),
+        Dense(32, activation="relu", kernel_regularizer=l2(0.001)),
         BatchNormalization(),
-        Dropout(0.2),
+        Dropout(0.25),
         Dense(1, activation="sigmoid"),
     ])
 
@@ -245,15 +341,15 @@ def train_lstm(features_df: pd.DataFrame, output_dir: str = "output",
     print("  Training LSTM model...")
     history = model.fit(
         X_train, y_train,
-        epochs=50,
+        epochs=60,
         batch_size=64,
         validation_split=0.15,
         class_weight=class_weight,
-        callbacks=[EarlyStopping(patience=8, restore_best_weights=True)],
+        callbacks=[EarlyStopping(patience=10, restore_best_weights=True)],
         verbose=0,
     )
 
-    # ── Evaluate ─────────────────────────────────────────────────────────
+    # -- Evaluate ---------------------------------------------------------
     y_prob = model.predict(X_test, verbose=0).flatten()
     y_pred = (y_prob >= 0.5).astype(int)
 
@@ -261,7 +357,7 @@ def train_lstm(features_df: pd.DataFrame, output_dir: str = "output",
     _plot_confusion("LSTM", y_test, y_pred, output_dir,
                     "confusion_matrix_lstm.png")
 
-    # ── Training History Plot ────────────────────────────────────────────
+    # -- Training History Plot --------------------------------------------
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
 
     ax1.plot(history.history["loss"], label="Train Loss")
@@ -283,7 +379,21 @@ def train_lstm(features_df: pd.DataFrame, output_dir: str = "output",
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "lstm_training_history.png"), dpi=150)
     plt.close()
-    print(f"  → Saved lstm_training_history.png")
+    print(f"  -> Saved lstm_training_history.png")
+
+    # -- Persist model, scaler, and metrics to disk -----------------------
+    model.save(LSTM_MODEL_PATH)
+    joblib.dump(scaler, LSTM_SCALER_PATH)
+    saved_metrics = {
+        "accuracy":  metrics["accuracy"],
+        "precision": metrics["precision"],
+        "recall":    metrics["recall"],
+        "f1":        metrics["f1"],
+        "seq_len":   seq_len,
+    }
+    with open(LSTM_METRICS_PATH, "w") as f:
+        json.dump(saved_metrics, f, indent=2)
+    print(f"  -> Saved lstm_model.keras, lstm_scaler.joblib, lstm_metrics.json")
 
     metrics["model"] = model
     metrics["scaler"] = scaler
@@ -291,85 +401,93 @@ def train_lstm(features_df: pd.DataFrame, output_dir: str = "output",
     return metrics
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Internal plot helpers
-# ─────────────────────────────────────────────────────────────────────────────
-def _plot_feature_comparison(features_df, feature_cols, output_dir):
-    """Side-by-side box plots comparing each feature between groups."""
-    fig, axes = plt.subplots(2, 4, figsize=(18, 8))
-    axes = axes.flatten()
+# -----------------------------------------------------------------------------
+# Plot helpers
+# -----------------------------------------------------------------------------
+def _plot_learning_curves(rf, xgb, X_train, y_train,
+                          all_groups, feature_cols, features_df, output_dir):
+    """Generate learning curves for RF and XGBoost."""
+    from sklearn.model_selection import GroupKFold
 
-    for i, col in enumerate(feature_cols):
-        if i >= len(axes):
-            break
-        healthy   = features_df.loc[features_df["label"] == 0, col]
-        parkinson = features_df.loc[features_df["label"] == 1, col]
-        axes[i].boxplot(
-            [healthy, parkinson],
-            labels=["Healthy", "Parkinson"],
-            patch_artist=True,
-            boxprops=dict(facecolor="#A1C9F4"),
+    groups_train = features_df.loc[
+        features_df.index.isin(
+            features_df.index[:len(X_train)]
+        ), "subject_id"
+    ].values[:len(X_train)]
+
+    # Use simple 3-fold CV for speed
+    train_sizes = np.linspace(0.2, 1.0, 6)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    for ax, model, name in [(axes[0], rf, "Random Forest"),
+                             (axes[1], xgb, "XGBoost")]:
+        train_sizes_abs, train_scores, val_scores = learning_curve(
+            model, X_train, y_train,
+            train_sizes=train_sizes,
+            cv=3,
+            scoring="accuracy",
+            n_jobs=-1,
+            random_state=42,
         )
-        axes[i].set_title(col, fontsize=11, fontweight="bold")
-        axes[i].grid(axis="y", alpha=0.3)
+        train_mean = train_scores.mean(axis=1)
+        train_std  = train_scores.std(axis=1)
+        val_mean   = val_scores.mean(axis=1)
+        val_std    = val_scores.std(axis=1)
 
-    for j in range(len(feature_cols), len(axes)):
-        axes[j].set_visible(False)
+        ax.fill_between(train_sizes_abs, train_mean - train_std,
+                        train_mean + train_std, alpha=0.15, color="#4C72B0")
+        ax.fill_between(train_sizes_abs, val_mean - val_std,
+                        val_mean + val_std, alpha=0.15, color="#DD8452")
+        ax.plot(train_sizes_abs, train_mean, 'o-', color="#4C72B0",
+                label="Training Score")
+        ax.plot(train_sizes_abs, val_mean, 'o-', color="#DD8452",
+                label="Validation Score")
+        ax.set_xlabel("Training Set Size", fontsize=12)
+        ax.set_ylabel("Accuracy", fontsize=12)
+        ax.set_title(f"Learning Curve -- {name}",
+                     fontsize=13, fontweight="bold")
+        ax.legend(loc="lower right")
+        ax.grid(alpha=0.3)
+        ax.set_ylim(0.5, 1.05)
 
-    fig.suptitle("Gait Feature Distributions: Healthy vs Parkinson",
-                 fontsize=15, fontweight="bold")
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "feature_comparison.png"), dpi=150)
+    plt.savefig(os.path.join(output_dir, "learning_curves_rf_xgb.png"), dpi=150)
     plt.close()
-    print(f"  → Saved feature_comparison.png")
+    print(f"  -> Saved learning_curves_rf_xgb.png")
 
 
-def _plot_risk_vs_variability(model, features_df, feature_cols, output_dir):
-    """Scatter: predicted Parkinson probability vs stride variability."""
-    X = features_df[feature_cols].values
-    probs = model.predict_proba(X)[:, 1]
-
-    fig, ax = plt.subplots(figsize=(7, 5))
-    colors = ["#2ca02c" if l == 0 else "#d62728"
-              for l in features_df["label"]]
-    ax.scatter(features_df["variability"], probs, c=colors, alpha=0.4, s=15)
-    ax.set_xlabel("Stride Variability", fontsize=12)
-    ax.set_ylabel("Predicted Parkinson Probability", fontsize=12)
-    ax.set_title("Fall Risk Indicator vs Gait Variability",
-                 fontsize=14, fontweight="bold")
-    ax.axhline(0.75, color="red", linestyle="--", linewidth=1,
-               label="High-risk threshold (0.75)")
-    ax.legend()
-    ax.grid(alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "risk_vs_variability.png"), dpi=150)
-    plt.close()
-    print(f"  → Saved risk_vs_variability.png")
-
-
-def _plot_model_comparison(results: dict, output_dir: str):
-    """Bar chart comparing metrics across all trained models."""
+def plot_all_model_comparison(results: dict, output_dir: str):
+    """
+    Bar chart comparing metrics across ALL trained models (RF, XGBoost, LSTM).
+    Called from app.py / main.py after all models are trained.
+    """
     metrics = list(next(iter(results.values())).keys())
     model_names = list(results.keys())
     x = np.arange(len(metrics))
     width = 0.8 / len(model_names)
 
-    fig, ax = plt.subplots(figsize=(9, 5))
-    colors = ["#4C72B0", "#DD8452", "#55A868", "#C44E52"]
+    fig, ax = plt.subplots(figsize=(10, 5))
+    colors = ["#4C72B0", "#DD8452", "#55A868"]
 
     for i, name in enumerate(model_names):
         vals = [results[name][m] for m in metrics]
-        ax.bar(x + i * width, vals, width, label=name,
-               color=colors[i % len(colors)])
+        bars = ax.bar(x + i * width, vals, width, label=name,
+                      color=colors[i % len(colors)])
+        # Add value labels on bars
+        for bar, val in zip(bars, vals):
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.01,
+                    f"{val:.3f}", ha='center', va='bottom', fontsize=8)
 
     ax.set_xticks(x + width * (len(model_names) - 1) / 2)
     ax.set_xticklabels(metrics)
-    ax.set_ylim(0, 1.05)
+    ax.set_ylim(0, 1.12)
     ax.set_ylabel("Score")
-    ax.set_title("Model Comparison", fontsize=14, fontweight="bold")
+    ax.set_title("Model Comparison -- All Models",
+                 fontsize=14, fontweight="bold")
     ax.legend()
     ax.grid(axis="y", alpha=0.3)
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "model_comparison.png"), dpi=150)
     plt.close()
-    print(f"  → Saved model_comparison.png")
+    print(f"  -> Saved model_comparison.png")

@@ -1,5 +1,5 @@
 # =============================================================================
-# main.py — Entry Point
+# main.py -- Entry Point
 # =============================================================================
 # Gait-Based Parkinson Detection and Real-Time Fall Risk Monitoring
 # Using Vertical Ground Reaction Force (vGRF) Signals
@@ -20,7 +20,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-# ── Project modules ──────────────────────────────────────────────────────────
+# -- Project modules ----------------------------------------------------------
 from src.data_loader import load_all_subjects
 from src.feature_extraction import (
     build_feature_dataframe,
@@ -33,7 +33,7 @@ from src.live_monitoring import simulate_live_monitoring
 from src.time_series_analysis import check_stationarity, decompose_gait
 
 
-# ── Configuration ────────────────────────────────────────────────────────────
+# -- Configuration ------------------------------------------------------------
 DATA_DIR   = os.path.join("data", "gait-in-parkinsons-disease-1.0.0")
 OUTPUT_DIR = os.path.join("output")
 FS         = 100          # sampling frequency (Hz)
@@ -46,7 +46,7 @@ def ensure_dirs():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# -- Helpers ------------------------------------------------------------------
 def _get_stride_intervals(df):
     """Extract stride intervals from a subject DataFrame."""
     from scipy.signal import find_peaks
@@ -58,12 +58,12 @@ def _get_stride_intervals(df):
     return np.diff(peaks) / FS
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # STEP 1 : Load Data
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 def step1_load_data():
     print("\n" + "=" * 60)
-    print("  STEP 1 — DATA LOADING")
+    print("  STEP 1 -- DATA LOADING")
     print("=" * 60)
 
     if not os.path.isdir(DATA_DIR):
@@ -80,12 +80,12 @@ def step1_load_data():
     return subjects
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # STEP 2 : Preprocessing + Feature Extraction
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 def step2_extract_features(subjects):
     print("\n" + "=" * 60)
-    print("  STEP 2 — PREPROCESSING & FEATURE EXTRACTION")
+    print("  STEP 2 -- PREPROCESSING & FEATURE EXTRACTION")
     print("=" * 60)
 
     features_df = build_feature_dataframe(subjects, WINDOW, STEP, FS)
@@ -94,21 +94,21 @@ def step2_extract_features(subjects):
     return features_df
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # STEP 3 : Time-Series Analysis
 #   3a. Autocorrelation of stride intervals
 #   3b. Stationarity check (ADF test)
 #   3c. Trend and seasonality decomposition
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 def step3_time_series_analysis(subjects):
     print("\n" + "=" * 60)
-    print("  STEP 3 — TIME-SERIES ANALYSIS")
+    print("  STEP 3 -- TIME-SERIES ANALYSIS")
     print("=" * 60)
 
     healthy_subj   = next((s for s in subjects if s[1] == 0), None)
     parkinson_subj = next((s for s in subjects if s[1] == 1), None)
 
-    # ── 3.0  Raw signal plots ────────────────────────────────────────────
+    # -- 3.0  Raw signal plots --------------------------------------------
     for subj, tag in [(healthy_subj, "Healthy"), (parkinson_subj, "Parkinson")]:
         if subj is None:
             continue
@@ -120,16 +120,16 @@ def step3_time_series_analysis(subjects):
         ax.plot(time_ax, sig, linewidth=0.5, color="#1f77b4")
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Total vGRF")
-        ax.set_title(f"Raw vGRF Signal — {tag} ({fname})",
+        ax.set_title(f"Raw vGRF Signal -- {tag} ({fname})",
                      fontsize=13, fontweight="bold")
         ax.grid(alpha=0.3)
         plt.tight_layout()
         plt.savefig(os.path.join(OUTPUT_DIR, f"raw_signal_{tag.lower()}.png"),
                     dpi=150)
         plt.close()
-        print(f"  → Saved raw_signal_{tag.lower()}.png")
+        print(f"  -> Saved raw_signal_{tag.lower()}.png")
 
-    # ── 3a. Autocorrelation of stride intervals ──────────────────────────
+    # -- 3a. Autocorrelation of stride intervals --------------------------
     print("\n  [3a] Autocorrelation of Stride Intervals")
     for subj, tag in [(healthy_subj, "Healthy"), (parkinson_subj, "Parkinson")]:
         if subj is None:
@@ -146,7 +146,7 @@ def step3_time_series_analysis(subjects):
         ax.bar(range(1, max_lag + 1), acf, color="#4C72B0", alpha=0.7)
         ax.set_xlabel("Lag (strides)")
         ax.set_ylabel("Autocorrelation")
-        ax.set_title(f"Stride Interval ACF — {tag}",
+        ax.set_title(f"Stride Interval ACF -- {tag}",
                      fontsize=13, fontweight="bold")
         ax.grid(axis="y", alpha=0.3)
         plt.tight_layout()
@@ -155,9 +155,9 @@ def step3_time_series_analysis(subjects):
             dpi=150,
         )
         plt.close()
-        print(f"  → Saved autocorrelation_{tag.lower()}.png")
+        print(f"  -> Saved autocorrelation_{tag.lower()}.png")
 
-    # ── 3b. Stationarity check (ADF test) ────────────────────────────────
+    # -- 3b. Stationarity check (ADF test) --------------------------------
     print("\n  [3b] Augmented Dickey-Fuller Test")
     for subj, tag in [(healthy_subj, "Healthy"), (parkinson_subj, "Parkinson")]:
         if subj is None:
@@ -167,7 +167,7 @@ def step3_time_series_analysis(subjects):
         if intervals is not None:
             check_stationarity(intervals, label=tag)
 
-    # ── 3c. Trend & Seasonality decomposition ────────────────────────────
+    # -- 3c. Trend & Seasonality decomposition ----------------------------
     print("\n  [3c] Trend and Seasonality Decomposition")
     for subj, tag in [(healthy_subj, "Healthy"), (parkinson_subj, "Parkinson")]:
         if subj is None:
@@ -178,12 +178,12 @@ def step3_time_series_analysis(subjects):
             decompose_gait(intervals, label=tag, output_dir=OUTPUT_DIR)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # STEP 4 : Train & Evaluate Models (RF, XGBoost, LSTM)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 def step4_train_models(features_df):
     print("\n" + "=" * 60)
-    print("  STEP 4 — MACHINE LEARNING MODELS")
+    print("  STEP 4 -- MACHINE LEARNING MODELS")
     print("=" * 60)
 
     # 4a. Random Forest + XGBoost
@@ -197,12 +197,12 @@ def step4_train_models(features_df):
     return rf_model, feature_names
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # STEP 5 : Fall Risk Prediction (Live Monitoring)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 def step5_live_monitoring(subjects, model, feature_names):
     print("\n" + "=" * 60)
-    print("  STEP 5a — FALL RISK PREDICTION (Live Monitoring)")
+    print("  STEP 5a -- FALL RISK PREDICTION (Live Monitoring)")
     print("=" * 60)
 
     healthy_subj   = next((s for s in subjects if s[1] == 0), None)
@@ -230,9 +230,9 @@ def step5_live_monitoring(subjects, model, feature_names):
         )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # STEP 5b : Compare Walking Patterns (Slow vs Fast Gait)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 def step5b_walk_pattern_comparison(features_df):
     """
     Compare walking patterns by splitting subjects into slow vs fast
@@ -243,7 +243,7 @@ def step5b_walk_pattern_comparison(features_df):
     as a proxy for different locomotion intensities.
     """
     print("\n" + "=" * 60)
-    print("  STEP 5b — WALKING PATTERN COMPARISON (Slow vs Fast Gait)")
+    print("  STEP 5b -- WALKING PATTERN COMPARISON (Slow vs Fast Gait)")
     print("=" * 60)
 
     median_cadence = features_df["cadence"].median()
@@ -277,23 +277,23 @@ def step5b_walk_pattern_comparison(features_df):
     plt.tight_layout()
     plt.savefig(os.path.join(OUTPUT_DIR, "walk_pattern_comparison.png"), dpi=150)
     plt.close()
-    print(f"  → Saved walk_pattern_comparison.png")
+    print(f"  -> Saved walk_pattern_comparison.png")
 
     # Show Parkinson prevalence in each group
     for speed in ["Slow", "Fast"]:
         group = features_df[features_df["gait_speed"] == speed]
         pd_ratio = group["label"].mean()
-        print(f"  {speed} gait → Parkinson prevalence: {pd_ratio:.1%}")
+        print(f"  {speed} gait -> Parkinson prevalence: {pd_ratio:.1%}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # RUN PIPELINE
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 def main():
-    print("\n" + "╔" + "═" * 58 + "╗")
+    print("\n" + "" + "=" * 58 + "")
     print("║  GAIT-BASED PARKINSON DETECTION & FALL RISK MONITORING  ║")
     print("║  Using Vertical Ground Reaction Force (vGRF) Signals    ║")
-    print("╚" + "═" * 58 + "╝\n")
+    print("" + "=" * 58 + "\n")
 
     ensure_dirs()
 
@@ -316,13 +316,13 @@ def main():
     step5b_walk_pattern_comparison(features_df)
 
     print("\n" + "=" * 60)
-    print("  ✓  ALL STEPS COMPLETE")
+    print("  [OK]  ALL STEPS COMPLETE")
     print(f"  Plots saved to:  {os.path.abspath(OUTPUT_DIR)}")
     print("=" * 60 + "\n")
 
-    # ── Clinical Summary ─────────────────────────────────────────────────
+    # -- Clinical Summary -------------------------------------------------
     print("  CLINICAL RELEVANCE SUMMARY")
-    print("  " + "─" * 40)
+    print("  " + "-" * 40)
     print("  • Increased stride variability is a hallmark of")
     print("    Parkinson's Disease and correlates with fall risk.")
     print("  • Reduced cadence indicates slower, less steady gait.")

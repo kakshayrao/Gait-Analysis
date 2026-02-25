@@ -22,12 +22,12 @@ def check_stationarity(stride_intervals: np.ndarray, label: str = ""):
     Perform the Augmented Dickey-Fuller (ADF) test on stride intervals.
 
     Null hypothesis: the series has a unit root (non-stationary).
-    If p-value < 0.05 → reject H0 → series is stationary.
+    If p-value < 0.05 -> reject H0 -> series is stationary.
 
     Parameters
     ----------
     stride_intervals : 1-D array of stride durations (seconds).
-    label : str — descriptive label for console output.
+    label : str -- descriptive label for console output.
 
     Returns
     -------
@@ -35,7 +35,7 @@ def check_stationarity(stride_intervals: np.ndarray, label: str = ""):
     """
     if len(stride_intervals) < 10:
         print(f"  [{label}] Too few intervals ({len(stride_intervals)}) "
-              "for ADF test — skipping.")
+              "for ADF test -- skipping.")
         return None
 
     result = adfuller(stride_intervals, autolag="AIC")
@@ -43,11 +43,11 @@ def check_stationarity(stride_intervals: np.ndarray, label: str = ""):
     p_value  = result[1]
     is_stationary = p_value < 0.05
 
-    print(f"\n  ADF Test — {label}")
-    print(f"  {'─' * 40}")
+    print(f"\n  ADF Test -- {label}")
+    print(f"  {'-' * 40}")
     print(f"  ADF Statistic : {adf_stat:.4f}")
     print(f"  p-value       : {p_value:.6f}")
-    print(f"  Stationary    : {'YES ✓' if is_stationary else 'NO ✗'}")
+    print(f"  Stationary    : {'YES [OK]' if is_stationary else 'NO ✗'}")
     for key, val in result[4].items():
         print(f"  Critical ({key}) : {val:.4f}")
 
@@ -65,19 +65,19 @@ def decompose_gait(stride_intervals: np.ndarray,
     Decompose stride intervals into trend, seasonal, and residual
     components using additive seasonal decomposition.
 
-    The 'period' is estimated from the data — typically corresponds
+    The 'period' is estimated from the data -- typically corresponds
     to a few gait cycles.
 
     Parameters
     ----------
     stride_intervals : 1-D array of stride durations (seconds).
-    label : str — descriptive label for the plot title.
-    output_dir : str — directory to save the decomposition plot.
+    label : str -- descriptive label for the plot title.
+    output_dir : str -- directory to save the decomposition plot.
     """
     os.makedirs(output_dir, exist_ok=True)
 
     if len(stride_intervals) < 20:
-        print(f"  [{label}] Too few intervals for decomposition — skipping.")
+        print(f"  [{label}] Too few intervals for decomposition -- skipping.")
         return
 
     # Use a period that captures ~10 strides as one "season"
@@ -93,7 +93,7 @@ def decompose_gait(stride_intervals: np.ndarray,
 
     axes[0].plot(stride_intervals, color="#1f77b4", linewidth=0.8)
     axes[0].set_ylabel("Observed")
-    axes[0].set_title(f"Gait Cycle Decomposition — {label}",
+    axes[0].set_title(f"Gait Cycle Decomposition -- {label}",
                       fontsize=14, fontweight="bold")
 
     axes[1].plot(decomposition.trend, color="#ff7f0e", linewidth=1.2)
@@ -114,4 +114,4 @@ def decompose_gait(stride_intervals: np.ndarray,
     save_path = os.path.join(output_dir, f"decomposition_{safe_label}.png")
     plt.savefig(save_path, dpi=150)
     plt.close()
-    print(f"  → Saved decomposition_{safe_label}.png")
+    print(f"  -> Saved decomposition_{safe_label}.png")

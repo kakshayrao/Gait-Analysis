@@ -20,7 +20,7 @@ import pandas as pd
 from scipy.signal import find_peaks
 
 
-# ── Signal Pre-processing Helpers ────────────────────────────────────────────
+# -- Signal Pre-processing Helpers --------------------------------------------
 
 def smooth_signal(signal: np.ndarray, window: int = 5) -> np.ndarray:
     """Simple moving-average smoothing."""
@@ -36,7 +36,7 @@ def normalize_signal(signal: np.ndarray) -> np.ndarray:
     return (signal - mn) / (mx - mn)
 
 
-# ── Windowing ────────────────────────────────────────────────────────────────
+# -- Windowing ----------------------------------------------------------------
 
 def segment_into_windows(signal: np.ndarray,
                          window_size: int = 300,
@@ -61,7 +61,22 @@ def segment_into_windows(signal: np.ndarray,
     return windows
 
 
-# ── Per-Window Feature Computation ───────────────────────────────────────────
+# -- Helpers ------------------------------------------------------------------
+
+def _spectral_entropy(signal: np.ndarray) -> float:
+    """Compute normalised spectral entropy via FFT power spectrum."""
+    fft_vals = np.abs(np.fft.rfft(signal)) ** 2
+    total = fft_vals.sum()
+    if total == 0:
+        return 0.0
+    psd = fft_vals / total                      # normalised PSD
+    psd = psd[psd > 0]                          # avoid log(0)
+    entropy = -np.sum(psd * np.log2(psd))
+    max_entropy = np.log2(len(fft_vals))
+    return entropy / max_entropy if max_entropy > 0 else 0.0
+
+
+# -- Per-Window Feature Computation -------------------------------------------
 
 def compute_window_features(left_win: np.ndarray,
                             right_win: np.ndarray,
@@ -100,18 +115,53 @@ def compute_window_features(left_win: np.ndarray,
     std_force  = np.std(total_win)
     cv_force   = std_force / mean_force if mean_force > 0 else 0.0
 
+    # -- NEW: Additional discriminative features --------------------------
+    # Peak force (heel-strike intensity)
+    peak_force = float(np.max(total_win))
+
+    # RMS of total force
+    rms_force = float(np.sqrt(np.mean(total_win ** 2)))
+
+    # Range of total force
+    range_force = float(np.max(total_win) - np.min(total_win))
+
+    # Swing-stance ratio (fraction of samples below mean -> swing phase)
+    swing_mask = total_win < mean_force
+    swing_stance_ratio = float(swing_mask.sum()) / len(total_win)
+
+    # Spectral entropy (frequency-domain irregularity)
+    spec_entropy = _spectral_entropy(total_win)
+
+    # Stride regularity via autocorrelation at dominant stride lag
+    if len(intervals) >= 2:
+        dominant_lag = int(round(np.median(np.diff(peaks))))
+        if 0 < dominant_lag < len(total_win) // 2:
+            acf = np.corrcoef(total_win[:-dominant_lag],
+                              total_win[dominant_lag:])[0, 1]
+            stride_regularity = float(acf) if np.isfinite(acf) else 0.0
+        else:
+            stride_regularity = 0.0
+    else:
+        stride_regularity = 0.0
+
     return {
-        "stride_time": stride_time,
-        "cadence":     cadence,
-        "variability": variability,
-        "symmetry":    symmetry,
-        "mean_force":  mean_force,
-        "std_force":   std_force,
-        "cv_force":    cv_force,
+        "stride_time":       stride_time,
+        "cadence":           cadence,
+        "variability":       variability,
+        "symmetry":          symmetry,
+        "mean_force":        mean_force,
+        "std_force":         std_force,
+        "cv_force":          cv_force,
+        "peak_force":        peak_force,
+        "rms_force":         rms_force,
+        "range_force":       range_force,
+        "swing_stance_ratio": swing_stance_ratio,
+        "spectral_entropy":  spec_entropy,
+        "stride_regularity": stride_regularity,
     }
 
 
-# ── Build Feature DataFrame from All Subjects ───────────────────────────────
+# -- Build Feature DataFrame from All Subjects -------------------------------
 
 def build_feature_dataframe(subjects: list,
                             window_size: int = 300,

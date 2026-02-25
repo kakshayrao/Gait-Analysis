@@ -1,12 +1,12 @@
 # =============================================================================
-# app.py — Flask Web Frontend
+# app.py -- Flask Web Frontend
 # =============================================================================
 # Serves a web dashboard for the Gait Analysis project.
 # Pages:
-#   /            → Dashboard with all results, plots, and metrics
-#   /live        → Interactive live monitoring with subject selector
-#   /api/subjects  → JSON list of available subjects
-#   /api/live/<filename> → Run live monitoring for a specific subject
+#   /            -> Dashboard with all results, plots, and metrics
+#   /live        -> Interactive live monitoring with subject selector
+#   /api/subjects  -> JSON list of available subjects
+#   /api/live/<filename> -> Run live monitoring for a specific subject
 # =============================================================================
 
 import os
@@ -25,14 +25,15 @@ from src.feature_extraction import (
     normalize_signal,
     compute_window_features,
 )
-from src.model import train_and_evaluate, train_lstm
+from src.model import train_and_evaluate, train_lstm, load_cached_lstm, plot_all_model_comparison
 from src.time_series_analysis import check_stationarity, decompose_gait
 from src.live_monitoring import simulate_live_monitoring
 
-# ── Configuration ────────────────────────────────────────────────────────────
+# -- Configuration ------------------------------------------------------------
 DATA_DIR   = os.path.join("data", "gait-in-parkinsons-disease-1.0.0")
 OUTPUT_DIR = os.path.join("output")
 MODEL_PATH = os.path.join(OUTPUT_DIR, "rf_model.pkl")
+XGB_MODEL_PATH = os.path.join(OUTPUT_DIR, "xgb_model.pkl")
 FEATURES_PATH = os.path.join(OUTPUT_DIR, "feature_names.json")
 FS = 100
 WINDOW = 300
@@ -40,7 +41,7 @@ STEP = 150
 
 app = Flask(__name__, static_folder="output", static_url_path="/output")
 
-# ── Globals (loaded once at startup) ─────────────────────────────────────────
+# -- Globals (loaded once at startup) -----------------------------------------
 subjects = []
 rf_model = None
 xgb_model = None
@@ -54,7 +55,8 @@ metrics_data = {}
 
 def startup():
     """Load data, train model (or load cached), and prepare metrics."""
-    global subjects, rf_model, xgb_model, lstm_model, lstm_scaler, lstm_seq_len, feature_names, features_df, metrics_data
+    global subjects, rf_model, xgb_model, lstm_model, lstm_scaler
+    global lstm_seq_len, feature_names, features_df, metrics_data
 
     print("Loading subjects...")
     subjects[:] = load_all_subjects(DATA_DIR)
@@ -63,22 +65,42 @@ def startup():
     features_df_local = build_feature_dataframe(subjects, WINDOW, STEP, FS)
     features_df = features_df_local
 
-    # Train or load model
-    if os.path.exists(MODEL_PATH) and os.path.exists(FEATURES_PATH):
-        print("Loading cached model...")
+    # -- Train or load RF + XGBoost ---------------------------------------
+    if (os.path.exists(MODEL_PATH)
+            and os.path.exists(XGB_MODEL_PATH)
+            and os.path.exists(FEATURES_PATH)):
+        print("Loading cached RF + XGBoost models...")
         rf_model = joblib.load(MODEL_PATH)
+        xgb_model = joblib.load(XGB_MODEL_PATH)
         with open(FEATURES_PATH) as f:
             feature_names[:] = json.load(f)
     else:
-        print("Training models...")
+        print("Training RF + XGBoost models...")
         rf_model_local, feat_names = train_and_evaluate(features_df, OUTPUT_DIR)
         rf_model = rf_model_local
         feature_names[:] = feat_names
-        joblib.dump(rf_model, MODEL_PATH)
-        with open(FEATURES_PATH, "w") as f:
-            json.dump(list(feat_names), f)
+        # Models are saved inside train_and_evaluate, also load XGBoost
+        xgb_model = joblib.load(XGB_MODEL_PATH)
 
-    # Run time-series analysis
+    # -- Train or load LSTM -----------------------------------------------
+    try:
+        lstm_result = train_lstm(features_df, OUTPUT_DIR)
+        lstm_model = lstm_result["model"]
+        lstm_scaler = lstm_result["scaler"]
+        lstm_seq_len = lstm_result["seq_len"]
+        metrics_data["lstm"] = {
+            "accuracy":  round(lstm_result["accuracy"], 4),
+            "precision": round(lstm_result["precision"], 4),
+            "recall":    round(lstm_result["recall"], 4),
+            "f1":        round(lstm_result["f1"], 4),
+        }
+    except Exception as e:
+        print(f"  [WARN] LSTM skipped: {e}")
+        metrics_data["lstm"] = {
+            "accuracy": "--", "precision": "--", "recall": "--", "f1": "--"
+        }
+
+    # -- Run time-series analysis -----------------------------------------
     healthy_subj = next((s for s in subjects if s[1] == 0), None)
     parkinson_subj = next((s for s in subjects if s[1] == 1), None)
 
@@ -96,17 +118,18 @@ def startup():
                 metrics_data[f"adf_{tag.lower()}"] = result
             decompose_gait(intervals, label=tag, output_dir=OUTPUT_DIR)
 
-    # Collect summary metrics for ALL models
-    from sklearn.model_selection import train_test_split
+    # -- Collect summary metrics for RF + XGBoost -------------------------
     from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-    from xgboost import XGBClassifier
+    from sklearn.model_selection import GroupShuffleSplit
 
     feature_cols = [c for c in features_df.columns if c not in ("label", "subject_id")]
     X = features_df[feature_cols].values
     y = features_df["label"].values
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, stratify=y, random_state=42
-    )
+    groups = features_df["subject_id"].values
+
+    gss = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+    train_idx, test_idx = next(gss.split(X, y, groups))
+    X_test, y_test = X[test_idx], y[test_idx]
 
     def _metrics(y_true, y_pred):
         return {
@@ -120,28 +143,9 @@ def startup():
     y_pred_rf = rf_model.predict(X_test)
     metrics_data["rf"] = _metrics(y_test, y_pred_rf)
 
-    # XGBoost — store globally for live monitoring
-    xgb_model = XGBClassifier(n_estimators=100, max_depth=6, learning_rate=0.1,
-                        eval_metric="logloss", random_state=42, verbosity=0)
-    xgb_model.fit(X_train, y_train)
+    # XGBoost
     y_pred_xgb = xgb_model.predict(X_test)
     metrics_data["xgb"] = _metrics(y_test, y_pred_xgb)
-
-    # LSTM — use the proper sequence-based training from model.py
-    try:
-        lstm_result = train_lstm(features_df, OUTPUT_DIR)
-        lstm_model = lstm_result["model"]
-        lstm_scaler = lstm_result["scaler"]
-        lstm_seq_len = lstm_result["seq_len"]
-        metrics_data["lstm"] = {
-            "accuracy":  round(lstm_result["accuracy"], 4),
-            "precision": round(lstm_result["precision"], 4),
-            "recall":    round(lstm_result["recall"], 4),
-            "f1":        round(lstm_result["f1"], 4),
-        }
-    except Exception as e:
-        print(f"  [WARN] LSTM metrics skipped: {e}")
-        metrics_data["lstm"] = {"accuracy": "—", "precision": "—", "recall": "—", "f1": "—"}
 
     metrics_data["dataset"] = {
         "total_files": len(subjects),
@@ -151,10 +155,39 @@ def startup():
         "healthy_windows": int((features_df["label"] == 0).sum()),
         "parkinson_windows": int((features_df["label"] == 1).sum()),
     }
+
+    # -- Generate all-3-models comparison chart ----------------------------
+    try:
+        plot_all_model_comparison(
+            {
+                "Random Forest": {
+                    "Accuracy": metrics_data["rf"]["accuracy"],
+                    "Precision": metrics_data["rf"]["precision"],
+                    "Recall": metrics_data["rf"]["recall"],
+                    "F1": metrics_data["rf"]["f1"],
+                },
+                "XGBoost": {
+                    "Accuracy": metrics_data["xgb"]["accuracy"],
+                    "Precision": metrics_data["xgb"]["precision"],
+                    "Recall": metrics_data["xgb"]["recall"],
+                    "F1": metrics_data["xgb"]["f1"],
+                },
+                "LSTM": {
+                    "Accuracy": metrics_data["lstm"]["accuracy"],
+                    "Precision": metrics_data["lstm"]["precision"],
+                    "Recall": metrics_data["lstm"]["recall"],
+                    "F1": metrics_data["lstm"]["f1"],
+                },
+            },
+            OUTPUT_DIR,
+        )
+    except Exception as e:
+        print(f"  [WARN] Model comparison plot skipped: {e}")
+
     print("Startup complete!")
 
 
-# ── Routes ───────────────────────────────────────────────────────────────────
+# -- Routes -------------------------------------------------------------------
 
 @app.route("/")
 def dashboard():
@@ -219,7 +252,7 @@ def run_live(filename):
     results = []
 
     if model_choice == "lstm":
-        # ── LSTM path: collect features, build sequences, predict ────────
+        # -- LSTM path: collect features, build sequences, predict --------
         all_feats = []
         all_times = []
         for i in range(0, len(total) - window_size + 1, step):
@@ -250,7 +283,7 @@ def run_live(filename):
                     "risk": round(prob, 4),
                 })
     else:
-        # ── RF / XGBoost path ────────────────────────────────────────────
+        # -- RF / XGBoost path --------------------------------------------
         model = rf_model if model_choice == "rf" else xgb_model
         for i in range(0, len(total) - window_size + 1, step):
             lw = left[i : i + window_size]
@@ -289,5 +322,5 @@ def serve_plot(filename):
 if __name__ == "__main__":
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     startup()
-    print("\n  ✓ Open http://127.0.0.1:5000 in your browser\n")
+    print("\n  [OK] Open http://127.0.0.1:5000 in your browser\n")
     app.run(debug=False, port=5000)

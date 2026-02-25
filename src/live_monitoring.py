@@ -41,13 +41,13 @@ def simulate_live_monitoring(model,
     Parameters
     ----------
     model : trained sklearn classifier with predict_proba
-    feature_names : list[str]  — column order used during training
+    feature_names : list[str]  -- column order used during training
     signal_left, signal_right, signal_total : 1-D numpy arrays
-    subject_label : str  — label for the plot title (e.g. "Healthy", "Parkinson")
+    subject_label : str  -- label for the plot title (e.g. "Healthy", "Parkinson")
     output_dir : str
-    fs : int — sampling frequency (Hz)
-    window_size : int — samples per window
-    step : int — hop between consecutive windows
+    fs : int -- sampling frequency (Hz)
+    window_size : int -- samples per window
+    step : int -- hop between consecutive windows
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -62,14 +62,14 @@ def simulate_live_monitoring(model,
 
     n_windows = (len(total) - window_size) // step + 1
 
-    print(f"\n{'─' * 55}")
-    print(f"  LIVE MONITORING — Subject: {subject_label}")
+    print(f"\n{'-' * 55}")
+    print(f"  LIVE MONITORING -- Subject: {subject_label}")
     print(f"  Signal length : {len(total)} samples "
           f"({len(total) / fs:.1f} s)")
     print(f"  Window        : {window_size} samples "
           f"({window_size / fs:.1f} s), step {step}")
     print(f"  Total windows : {n_windows}")
-    print(f"{'─' * 55}")
+    print(f"{'-' * 55}")
 
     for i in range(0, len(total) - window_size + 1, step):
         lw = left[i : i + window_size]
@@ -102,9 +102,9 @@ def simulate_live_monitoring(model,
     print(f"  Mean risk score: {mean_risk:.3f}")
     print(f"  Alerts triggered: {alert_count}")
 
-    # ── Risk Over Time Plot ──────────────────────────────────────────────
+    # -- Risk Over Time Plot ----------------------------------------------
     if not time_points:
-        print("  [WARN] No valid windows — skipping plot.")
+        print("  [WARN] No valid windows -- skipping plot.")
         return
 
     fig, (ax_line, ax_bar) = plt.subplots(
@@ -122,7 +122,7 @@ def simulate_live_monitoring(model,
                          color="#1f77b4")
     ax_line.set_xlabel("Time (s)", fontsize=12)
     ax_line.set_ylabel("Predicted Risk Probability", fontsize=12)
-    ax_line.set_title(f"Real-Time Fall Risk — {subject_label}",
+    ax_line.set_title(f"Real-Time Fall Risk -- {subject_label}",
                       fontsize=14, fontweight="bold")
     ax_line.set_ylim(-0.05, 1.05)
     ax_line.legend(loc="upper right")
@@ -145,4 +145,4 @@ def simulate_live_monitoring(model,
     save_path = os.path.join(output_dir, f"live_monitoring_{safe_label}.png")
     plt.savefig(save_path, dpi=150)
     plt.close()
-    print(f"  → Saved {os.path.basename(save_path)}")
+    print(f"  -> Saved {os.path.basename(save_path)}")
