@@ -317,16 +317,16 @@ def train_lstm(features_df: pd.DataFrame, output_dir: str = "output",
     class_weight = {0: total / (2 * n_neg), 1: total / (2 * n_pos)}
     print(f"  Class weights: {class_weight}")
 
-    # -- Build LSTM Model (moderate regularization to prevent overfitting) -
+    # -- Build LSTM Model (scaled for 20 features, moderate regularization) -
     from tensorflow.keras.regularizers import l2
 
     model = Sequential([
-        LSTM(96, input_shape=(seq_len, len(feature_cols)),
-             return_sequences=True, kernel_regularizer=l2(0.001)),
+        LSTM(128, input_shape=(seq_len, len(feature_cols)),
+             return_sequences=True, kernel_regularizer=l2(0.0005)),
         Dropout(0.3),
-        LSTM(48, return_sequences=False, kernel_regularizer=l2(0.001)),
+        LSTM(64, return_sequences=False, kernel_regularizer=l2(0.0005)),
         Dropout(0.3),
-        Dense(32, activation="relu", kernel_regularizer=l2(0.001)),
+        Dense(64, activation="relu", kernel_regularizer=l2(0.0005)),
         BatchNormalization(),
         Dropout(0.25),
         Dense(1, activation="sigmoid"),
@@ -341,11 +341,11 @@ def train_lstm(features_df: pd.DataFrame, output_dir: str = "output",
     print("  Training LSTM model...")
     history = model.fit(
         X_train, y_train,
-        epochs=60,
-        batch_size=64,
+        epochs=100,
+        batch_size=128,
         validation_split=0.15,
         class_weight=class_weight,
-        callbacks=[EarlyStopping(patience=10, restore_best_weights=True)],
+        callbacks=[EarlyStopping(patience=15, restore_best_weights=True)],
         verbose=0,
     )
 

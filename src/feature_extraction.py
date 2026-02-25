@@ -144,20 +144,77 @@ def compute_window_features(left_win: np.ndarray,
     else:
         stride_regularity = 0.0
 
+    # -- NEW: High-discriminability PD biomarkers -------------------------
+
+    # 1. Freeze-of-Gait (FoG) index: power in freeze band (3-8 Hz)
+    #    divided by locomotion band (0.5-3 Hz). High in PD freezers.
+    freqs = np.fft.rfftfreq(len(total_win), d=1.0/fs)
+    fft_power = np.abs(np.fft.rfft(total_win)) ** 2
+    loco_mask   = (freqs >= 0.5) & (freqs < 3.0)
+    freeze_mask = (freqs >= 3.0) & (freqs < 8.0)
+    loco_power   = fft_power[loco_mask].sum()
+    freeze_power = fft_power[freeze_mask].sum()
+    fog_index = freeze_power / (loco_power + 1e-8)
+
+    # 2. Mean jerk: rate of change of total force -- PD has more irregular
+    jerk = float(np.mean(np.abs(np.diff(total_win))))
+
+    # 3. Force skewness -- PD gait tends to drag, shifting the distribution
+    force_mean = np.mean(total_win)
+    force_std  = np.std(total_win) + 1e-8
+    skewness = float(np.mean(((total_win - force_mean) / force_std) ** 3))
+
+    # 4. Force kurtosis -- measures impulsiveness of heel strikes
+    kurtosis = float(np.mean(((total_win - force_mean) / force_std) ** 4))
+
+    # 5. Mean heel-strike width (peak prominence width proxy)
+    if len(peaks) >= 2:
+        half_heights = total_win[peaks] * 0.5
+        widths = []
+        for p, hh in zip(peaks, half_heights):
+            left_crossings  = np.where(total_win[:p] < hh)[0]
+            right_crossings = np.where(total_win[p:] < hh)[0]
+            l = left_crossings[-1]  if len(left_crossings)  > 0 else 0
+            r = p + right_crossings[0] if len(right_crossings) > 0 else len(total_win) - 1
+            widths.append(r - l)
+        mean_strike_width = float(np.mean(widths)) / fs
+    else:
+        mean_strike_width = 0.0
+
+    # 6. Left-right peak force asymmetry
+    left_peaks, _  = find_peaks(left_win,  height=np.mean(left_win)*0.4,
+                                 distance=int(fs * 0.4))
+    right_peaks, _ = find_peaks(right_win, height=np.mean(right_win)*0.4,
+                                 distance=int(fs * 0.4))
+    lp_mean = np.mean(left_win[left_peaks])   if len(left_peaks)  > 0 else 0.0
+    rp_mean = np.mean(right_win[right_peaks]) if len(right_peaks) > 0 else 0.0
+    peak_asymmetry = abs(lp_mean - rp_mean) / (lp_mean + rp_mean + 1e-8)
+
+    # 7. Stride interval coefficient of variation (already have std; add CV)
+    stride_cv = float(np.std(intervals) / (np.mean(intervals) + 1e-8))
+
     return {
-        "stride_time":       stride_time,
-        "cadence":           cadence,
-        "variability":       variability,
-        "symmetry":          symmetry,
-        "mean_force":        mean_force,
-        "std_force":         std_force,
-        "cv_force":          cv_force,
-        "peak_force":        peak_force,
-        "rms_force":         rms_force,
-        "range_force":       range_force,
+        "stride_time":        stride_time,
+        "cadence":            cadence,
+        "variability":        variability,
+        "symmetry":           symmetry,
+        "mean_force":         mean_force,
+        "std_force":          std_force,
+        "cv_force":           cv_force,
+        "peak_force":         peak_force,
+        "rms_force":          rms_force,
+        "range_force":        range_force,
         "swing_stance_ratio": swing_stance_ratio,
-        "spectral_entropy":  spec_entropy,
-        "stride_regularity": stride_regularity,
+        "spectral_entropy":   spec_entropy,
+        "stride_regularity":  stride_regularity,
+        # New high-discriminability features
+        "fog_index":          float(fog_index),
+        "jerk":               jerk,
+        "skewness":           skewness,
+        "kurtosis":           kurtosis,
+        "mean_strike_width":  mean_strike_width,
+        "peak_asymmetry":     peak_asymmetry,
+        "stride_cv":          stride_cv,
     }
 
 
@@ -177,27 +234,21 @@ def build_feature_dataframe(subjects: list,
 
     Returns
     -------
-    pd.DataFrame with columns:
-        stride_time, cadence, variability, symmetry,
-        mean_force, std_force, cv_force, label
+    pd.DataFrame with feature columns + label + subject_id
     """
     rows = []
 
     for df, label, fname in subjects:
-        # Handle any NaN values by forward-fill then zero-fill
         df = df.ffill().fillna(0)
 
-        # Extract the three core signals
         left_signal  = smooth_signal(df["total_left"].values)
         right_signal = smooth_signal(df["total_right"].values)
         total_signal = smooth_signal(df["total_force"].values)
 
-        # Normalize per subject
         left_norm  = normalize_signal(left_signal)
         right_norm = normalize_signal(right_signal)
         total_norm = normalize_signal(total_signal)
 
-        # Segment into windows
         left_wins  = segment_into_windows(left_norm,  window_size, step)
         right_wins = segment_into_windows(right_norm, window_size, step)
         total_wins = segment_into_windows(total_norm, window_size, step)
@@ -214,3 +265,4 @@ def build_feature_dataframe(subjects: list,
           f"(Healthy: {(feature_df['label'] == 0).sum()}, "
           f"Parkinson: {(feature_df['label'] == 1).sum()})")
     return feature_df
+
