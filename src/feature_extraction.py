@@ -1,268 +1,169 @@
-# =============================================================================
-# feature_extraction.py
-# =============================================================================
-# Segments vGRF signals into fixed-length windows and extracts interpretable
-# gait features used for Parkinson's Disease classification.
-#
-# Features per window
-# -------------------
-#   stride_time     : mean time between consecutive force peaks (seconds)
-#   cadence         : steps per minute  (60 / stride_time)
-#   variability     : standard deviation of stride intervals
-#   symmetry        : left-right force symmetry  (ratio of RMS forces)
-#   mean_force      : mean total vertical ground reaction force
-#   std_force       : standard deviation of total force
-#   cv_force        : coefficient of variation of total force
-# =============================================================================
+"""
+src/feature_extraction.py
+==========================
+Extracts biomechanically-meaningful gait features from IMU windows.
+
+Each UCI HAR window is 128 samples at 50 Hz (= 2.56 seconds).
+Features are computed from the acc and gyro magnitude signals.
+"""
 
 import numpy as np
-import pandas as pd
 from scipy.signal import find_peaks
+from src.preprocessing import extract_imu_components
+
+FS = 50   # Hz
 
 
-# -- Signal Pre-processing Helpers --------------------------------------------
+# ─── Spectral helpers ────────────────────────────────────────────────────────
 
-def smooth_signal(signal: np.ndarray, window: int = 5) -> np.ndarray:
-    """Simple moving-average smoothing."""
-    kernel = np.ones(window) / window
-    return np.convolve(signal, kernel, mode="same")
-
-
-def normalize_signal(signal: np.ndarray) -> np.ndarray:
-    """Min-max normalization to [0, 1]."""
-    mn, mx = signal.min(), signal.max()
-    if mx - mn == 0:
-        return np.zeros_like(signal)
-    return (signal - mn) / (mx - mn)
+def _spectral_entropy(signal: np.ndarray) -> float:
+    """Normalised spectral entropy from FFT power spectrum."""
+    fft_power = np.abs(np.fft.rfft(signal)) ** 2
+    total = fft_power.sum()
+    if total == 0:
+        return 0.0
+    psd = fft_power / total
+    psd = psd[psd > 0]
+    entropy = -np.sum(psd * np.log2(psd))
+    return float(entropy / np.log2(len(fft_power))) if len(fft_power) > 1 else 0.0
 
 
-# -- Windowing ----------------------------------------------------------------
+def _dominant_frequency(signal: np.ndarray, fs: float = FS) -> float:
+    """Frequency (Hz) at the maximum power in the FFT spectrum."""
+    fft_power = np.abs(np.fft.rfft(signal)) ** 2
+    freqs = np.fft.rfftfreq(len(signal), d=1.0 / fs)
+    # Exclude DC component
+    fft_power[0] = 0
+    return float(freqs[np.argmax(fft_power)])
 
-def segment_into_windows(signal: np.ndarray,
-                         window_size: int = 300,
-                         step: int = 150) -> list:
+
+# ─── Per-window feature computation ──────────────────────────────────────────
+
+def compute_imu_features(window: np.ndarray, fs: float = FS) -> dict | None:
     """
-    Slide a fixed-size window across the signal.
+    Compute 12 gait features from one IMU window.
 
     Parameters
     ----------
-    window_size : int
-        Number of samples per window (300 = 3 s at 100 Hz).
-    step : int
-        Hop size between windows (150 = 50 % overlap).
+    window : np.ndarray  shape (128, 6)
+        [body_acc_x, body_acc_y, body_acc_z, body_gyro_x, body_gyro_y, body_gyro_z]
+    fs : float
+        Sampling frequency in Hz.
 
     Returns
     -------
-    List of 1-D numpy arrays.
+    dict of features, or None if insufficient peaks for stride computation.
     """
-    windows = []
-    for start in range(0, len(signal) - window_size + 1, step):
-        windows.append(signal[start : start + window_size])
-    return windows
+    (acc_x, acc_y, acc_z,
+     gyro_x, gyro_y, gyro_z,
+     acc_mag, gyro_mag) = extract_imu_components(window)
 
+    # ── Stride / Cadence ────────────────────────────────────────────────────
+    height_threshold = np.mean(acc_mag) * 0.8
+    peaks, _ = find_peaks(acc_mag,
+                           height=height_threshold,
+                           distance=int(fs * 0.3))   # min 0.3 s between steps
 
-# -- Helpers ------------------------------------------------------------------
+    if len(peaks) < 2:
+        return None   # not enough steps detected in this window
 
-def _spectral_entropy(signal: np.ndarray) -> float:
-    """Compute normalised spectral entropy via FFT power spectrum."""
-    fft_vals = np.abs(np.fft.rfft(signal)) ** 2
-    total = fft_vals.sum()
-    if total == 0:
-        return 0.0
-    psd = fft_vals / total                      # normalised PSD
-    psd = psd[psd > 0]                          # avoid log(0)
-    entropy = -np.sum(psd * np.log2(psd))
-    max_entropy = np.log2(len(fft_vals))
-    return entropy / max_entropy if max_entropy > 0 else 0.0
+    intervals = np.diff(peaks) / fs          # seconds between consecutive steps
+    stride_time  = float(np.mean(intervals))
+    cadence      = 60.0 / stride_time if stride_time > 0 else 0.0
+    step_variance = float(np.var(intervals))
 
+    # ── Symmetry index ──────────────────────────────────────────────────────
+    # Energy in first half vs second half of window
+    half = len(acc_mag) // 2
+    e1 = float(np.sum(acc_mag[:half] ** 2))
+    e2 = float(np.sum(acc_mag[half:] ** 2))
+    symmetry_index = e1 / (e2 + 1e-8)
 
-# -- Per-Window Feature Computation -------------------------------------------
+    # ── Signal Magnitude Area ────────────────────────────────────────────────
+    sma = float(np.mean(np.abs(acc_x) + np.abs(acc_y) + np.abs(acc_z)))
 
-def compute_window_features(left_win: np.ndarray,
-                            right_win: np.ndarray,
-                            total_win: np.ndarray,
-                            fs: int = 100):
-    """
-    Extract gait features from one window of data.
+    # ── Gyroscope features ───────────────────────────────────────────────────
+    mean_gyro = float(np.mean(gyro_mag))
 
-    Returns None if insufficient peaks are found for stride computation.
-    """
-    # --- Detect peaks in the total force signal ----
-    # Height threshold: half the mean force avoids noise spikes
-    height = np.mean(total_win) * 0.5
-    peaks, _ = find_peaks(total_win, height=height, distance=int(fs * 0.4))
+    # ── Jerk (rate of change of acceleration) ────────────────────────────────
+    jerk = float(np.mean(np.abs(np.diff(acc_mag))))
 
-    if len(peaks) < 3:
-        return None  # need at least 3 peaks to compute variability
+    # ── Frequency domain ─────────────────────────────────────────────────────
+    dom_freq       = _dominant_frequency(acc_mag, fs)
+    spec_entropy   = _spectral_entropy(acc_mag)
 
-    # Stride intervals (time between consecutive peaks)
-    intervals = np.diff(peaks) / fs  # seconds
-
-    stride_time = np.mean(intervals)
-    cadence     = 60.0 / stride_time if stride_time > 0 else 0.0
-    variability = np.std(intervals)
-
-    # Gait symmetry: ratio of RMS(left) / RMS(right)
-    rms_left  = np.sqrt(np.mean(left_win ** 2))
-    rms_right = np.sqrt(np.mean(right_win ** 2))
-    if rms_right == 0:
-        symmetry = 0.0
+    # ── Autocorrelation at lag-1 ─────────────────────────────────────────────
+    if len(acc_mag) > 1:
+        acf = np.corrcoef(acc_mag[:-1], acc_mag[1:])[0, 1]
+        autocorr = float(acf) if np.isfinite(acf) else 0.0
     else:
-        symmetry = rms_left / rms_right  # 1.0 = perfectly symmetric
+        autocorr = 0.0
 
-    # Basic statistical features of the total force
-    mean_force = np.mean(total_win)
-    std_force  = np.std(total_win)
-    cv_force   = std_force / mean_force if mean_force > 0 else 0.0
+    # ── RMS acceleration ─────────────────────────────────────────────────────
+    rms_acc = float(np.sqrt(np.mean(acc_mag ** 2)))
 
-    # -- NEW: Additional discriminative features --------------------------
-    # Peak force (heel-strike intensity)
-    peak_force = float(np.max(total_win))
+    # ── Tilt angle (mean inclination from vertical) ──────────────────────────
+    acc_xy = np.sqrt(acc_x ** 2 + acc_y ** 2) + 1e-8
+    tilt_rad = np.arctan2(np.abs(acc_z), acc_xy)
+    tilt_angle = float(np.degrees(np.mean(tilt_rad)))
 
-    # RMS of total force
-    rms_force = float(np.sqrt(np.mean(total_win ** 2)))
-
-    # Range of total force
-    range_force = float(np.max(total_win) - np.min(total_win))
-
-    # Swing-stance ratio (fraction of samples below mean -> swing phase)
-    swing_mask = total_win < mean_force
-    swing_stance_ratio = float(swing_mask.sum()) / len(total_win)
-
-    # Spectral entropy (frequency-domain irregularity)
-    spec_entropy = _spectral_entropy(total_win)
-
-    # Stride regularity via autocorrelation at dominant stride lag
-    if len(intervals) >= 2:
-        dominant_lag = int(round(np.median(np.diff(peaks))))
-        if 0 < dominant_lag < len(total_win) // 2:
-            acf = np.corrcoef(total_win[:-dominant_lag],
-                              total_win[dominant_lag:])[0, 1]
-            stride_regularity = float(acf) if np.isfinite(acf) else 0.0
-        else:
-            stride_regularity = 0.0
-    else:
-        stride_regularity = 0.0
-
-    # -- NEW: High-discriminability PD biomarkers -------------------------
-
-    # 1. Freeze-of-Gait (FoG) index: power in freeze band (3-8 Hz)
-    #    divided by locomotion band (0.5-3 Hz). High in PD freezers.
-    freqs = np.fft.rfftfreq(len(total_win), d=1.0/fs)
-    fft_power = np.abs(np.fft.rfft(total_win)) ** 2
-    loco_mask   = (freqs >= 0.5) & (freqs < 3.0)
-    freeze_mask = (freqs >= 3.0) & (freqs < 8.0)
-    loco_power   = fft_power[loco_mask].sum()
-    freeze_power = fft_power[freeze_mask].sum()
-    fog_index = freeze_power / (loco_power + 1e-8)
-
-    # 2. Mean jerk: rate of change of total force -- PD has more irregular
-    jerk = float(np.mean(np.abs(np.diff(total_win))))
-
-    # 3. Force skewness -- PD gait tends to drag, shifting the distribution
-    force_mean = np.mean(total_win)
-    force_std  = np.std(total_win) + 1e-8
-    skewness = float(np.mean(((total_win - force_mean) / force_std) ** 3))
-
-    # 4. Force kurtosis -- measures impulsiveness of heel strikes
-    kurtosis = float(np.mean(((total_win - force_mean) / force_std) ** 4))
-
-    # 5. Mean heel-strike width (peak prominence width proxy)
-    if len(peaks) >= 2:
-        half_heights = total_win[peaks] * 0.5
-        widths = []
-        for p, hh in zip(peaks, half_heights):
-            left_crossings  = np.where(total_win[:p] < hh)[0]
-            right_crossings = np.where(total_win[p:] < hh)[0]
-            l = left_crossings[-1]  if len(left_crossings)  > 0 else 0
-            r = p + right_crossings[0] if len(right_crossings) > 0 else len(total_win) - 1
-            widths.append(r - l)
-        mean_strike_width = float(np.mean(widths)) / fs
-    else:
-        mean_strike_width = 0.0
-
-    # 6. Left-right peak force asymmetry
-    left_peaks, _  = find_peaks(left_win,  height=np.mean(left_win)*0.4,
-                                 distance=int(fs * 0.4))
-    right_peaks, _ = find_peaks(right_win, height=np.mean(right_win)*0.4,
-                                 distance=int(fs * 0.4))
-    lp_mean = np.mean(left_win[left_peaks])   if len(left_peaks)  > 0 else 0.0
-    rp_mean = np.mean(right_win[right_peaks]) if len(right_peaks) > 0 else 0.0
-    peak_asymmetry = abs(lp_mean - rp_mean) / (lp_mean + rp_mean + 1e-8)
-
-    # 7. Stride interval coefficient of variation (already have std; add CV)
+    # ── Stride coefficient of variation ──────────────────────────────────────
     stride_cv = float(np.std(intervals) / (np.mean(intervals) + 1e-8))
 
     return {
-        "stride_time":        stride_time,
-        "cadence":            cadence,
-        "variability":        variability,
-        "symmetry":           symmetry,
-        "mean_force":         mean_force,
-        "std_force":          std_force,
-        "cv_force":           cv_force,
-        "peak_force":         peak_force,
-        "rms_force":          rms_force,
-        "range_force":        range_force,
-        "swing_stance_ratio": swing_stance_ratio,
-        "spectral_entropy":   spec_entropy,
-        "stride_regularity":  stride_regularity,
-        # New high-discriminability features
-        "fog_index":          float(fog_index),
-        "jerk":               jerk,
-        "skewness":           skewness,
-        "kurtosis":           kurtosis,
-        "mean_strike_width":  mean_strike_width,
-        "peak_asymmetry":     peak_asymmetry,
-        "stride_cv":          stride_cv,
+        "stride_time":    stride_time,
+        "cadence":        cadence,
+        "step_variance":  step_variance,
+        "symmetry_index": symmetry_index,
+        "sma":            sma,
+        "mean_gyro":      mean_gyro,
+        "jerk":           jerk,
+        "dominant_freq":  dom_freq,
+        "spectral_entropy": spec_entropy,
+        "autocorr_lag1":  autocorr,
+        "rms_acc":        rms_acc,
+        "tilt_angle":     tilt_angle,
+        "stride_cv":      stride_cv,
     }
 
 
-# -- Build Feature DataFrame from All Subjects -------------------------------
+# ─── Build feature DataFrame from all windows ─────────────────────────────────
 
-def build_feature_dataframe(subjects: list,
-                            window_size: int = 300,
-                            step: int = 150,
-                            fs: int = 100) -> pd.DataFrame:
+def build_feature_dataframe(X: np.ndarray,
+                            y_risk: np.ndarray,
+                            y_activity: np.ndarray,
+                            subjects: np.ndarray):
     """
-    Process every subject's signals and create one row per window.
+    Extract features from all windows into a pandas DataFrame.
 
     Parameters
     ----------
-    subjects : list of (DataFrame, label, filename) tuples
-        As returned by data_loader.load_all_subjects().
+    X          : (N, 128, 6)  raw IMU windows
+    y_risk     : (N,)         binary fall risk labels (0=low, 1=high)
+    y_activity : (N,)         original activity labels (1-3)
+    subjects   : (N,)         subject IDs
 
     Returns
     -------
-    pd.DataFrame with feature columns + label + subject_id
+    pd.DataFrame with feature columns + label + subject_id + activity
     """
+    import pandas as pd
+
     rows = []
+    skipped = 0
+    for i in range(len(X)):
+        feats = compute_imu_features(X[i])
+        if feats is None:
+            skipped += 1
+            continue
+        feats["label"]      = int(y_risk[i])
+        feats["activity"]   = int(y_activity[i])
+        feats["subject_id"] = int(subjects[i])
+        rows.append(feats)
 
-    for df, label, fname in subjects:
-        df = df.ffill().fillna(0)
-
-        left_signal  = smooth_signal(df["total_left"].values)
-        right_signal = smooth_signal(df["total_right"].values)
-        total_signal = smooth_signal(df["total_force"].values)
-
-        left_norm  = normalize_signal(left_signal)
-        right_norm = normalize_signal(right_signal)
-        total_norm = normalize_signal(total_signal)
-
-        left_wins  = segment_into_windows(left_norm,  window_size, step)
-        right_wins = segment_into_windows(right_norm, window_size, step)
-        total_wins = segment_into_windows(total_norm, window_size, step)
-
-        for lw, rw, tw in zip(left_wins, right_wins, total_wins):
-            feats = compute_window_features(lw, rw, tw, fs)
-            if feats is not None:
-                feats["label"] = label
-                feats["subject_id"] = fname
-                rows.append(feats)
-
-    feature_df = pd.DataFrame(rows)
-    print(f"Extracted {len(feature_df)} feature windows "
-          f"(Healthy: {(feature_df['label'] == 0).sum()}, "
-          f"Parkinson: {(feature_df['label'] == 1).sum()})")
-    return feature_df
-
+    df = pd.DataFrame(rows)
+    print(f"Feature extraction: {len(df)} windows  "
+          f"(skipped {skipped} with <2 peaks)")
+    print(f"  Low risk: {(df['label']==0).sum()}  "
+          f"High risk: {(df['label']==1).sum()}")
+    return df

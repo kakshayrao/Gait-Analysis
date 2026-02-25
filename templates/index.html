@@ -1,0 +1,805 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IMU Gait Analysis — Fall Risk Detection</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --card: #21253a;
+      --accent: #6c63ff;
+      --accent2: #00d4aa;
+      --warn: #ff6b6b;
+      --text: #e8eaf6;
+      --muted: #888ba8;
+      --border: rgba(255, 255, 255, 0.07);
+      --low: #4caf50;
+      --high: #f44336;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    /* ── Header ── */
+    header {
+      background: linear-gradient(135deg, #1a1d27 0%, #12152a 100%);
+      border-bottom: 1px solid var(--border);
+      padding: 22px 40px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    header .logo {
+      font-size: 28px;
+    }
+
+    header h1 {
+      font-size: 22px;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    header p {
+      font-size: 13px;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+
+    .badge {
+      margin-left: auto;
+      background: var(--accent);
+      color: #fff;
+      padding: 5px 14px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    /* ── Layout ── */
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 32px 24px;
+    }
+
+    .section-title {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 1.2px;
+      margin: 36px 0 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .section-title::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: var(--border);
+    }
+
+    /* ── Loading Screen ── */
+    #loading {
+      position: fixed;
+      inset: 0;
+      background: var(--bg);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 999;
+      gap: 16px;
+    }
+
+    .spinner {
+      width: 52px;
+      height: 52px;
+      border: 4px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.9s linear infinite;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    #loading p {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    /* ── Metric Cards ── */
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 16px;
+    }
+
+    .metric-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 22px 24px;
+      position: relative;
+      overflow: hidden;
+      transition: transform 0.2s;
+    }
+
+    .metric-card:hover {
+      transform: translateY(-2px);
+    }
+
+    .metric-card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 3px;
+    }
+
+    .metric-card.rf::before {
+      background: var(--accent);
+    }
+
+    .metric-card.xgb::before {
+      background: var(--accent2);
+    }
+
+    .metric-card.lstm::before {
+      background: var(--warn);
+    }
+
+    .metric-card h3 {
+      font-size: 13px;
+      color: var(--muted);
+      font-weight: 500;
+      margin-bottom: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .metric-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 6px;
+    }
+
+    .metric-row .label {
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .metric-row .value {
+      font-size: 20px;
+      font-weight: 700;
+    }
+
+    .metric-row .value.good {
+      color: var(--low);
+    }
+
+    .metric-row .value.warn {
+      color: var(--warn);
+    }
+
+    .metric-sub {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid var(--border);
+    }
+
+    .metric-sub span {
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    /* ── Chart Grids ── */
+    .chart-grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+    }
+
+    .chart-grid-2 {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 16px;
+    }
+
+    .chart-grid-1 {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 16px;
+    }
+
+    @media (max-width: 900px) {
+
+      .chart-grid-3,
+      .chart-grid-2 {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .chart-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 20px;
+      overflow: hidden;
+    }
+
+    .chart-card h4 {
+      font-size: 13px;
+      color: var(--muted);
+      margin-bottom: 14px;
+      font-weight: 500;
+    }
+
+    .chart-card img {
+      width: 100%;
+      height: auto;
+      border-radius: 8px;
+      display: block;
+    }
+
+    /* ── Info Banner ── */
+    .info-banner {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 20px 24px;
+      display: flex;
+      align-items: flex-start;
+      gap: 14px;
+      margin-bottom: 12px;
+    }
+
+    .info-banner .icon {
+      font-size: 24px;
+      flex-shrink: 0;
+    }
+
+    .info-banner p {
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.7;
+    }
+
+    .info-banner strong {
+      color: var(--text);
+    }
+
+    /* ── Footer ── */
+    footer {
+      text-align: center;
+      padding: 28px;
+      color: var(--muted);
+      font-size: 12px;
+      border-top: 1px solid var(--border);
+      margin-top: 48px;
+    }
+
+    /* ── Live Monitoring ── */
+    .live-controls {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      align-items: flex-end;
+      margin-bottom: 20px;
+    }
+
+    .live-controls label {
+      font-size: 12px;
+      color: var(--muted);
+      display: block;
+      margin-bottom: 5px;
+    }
+
+    .live-controls select,
+    .live-controls button {
+      background: var(--card);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 9px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      min-width: 160px;
+      cursor: pointer;
+    }
+
+    .live-controls select:focus,
+    .live-controls button:focus {
+      outline: 2px solid var(--accent);
+    }
+
+    .live-controls button {
+      background: var(--accent);
+      border-color: var(--accent);
+      font-weight: 600;
+      transition: opacity 0.2s;
+      min-width: 120px;
+    }
+
+    .live-controls button:hover {
+      opacity: 0.85;
+    }
+
+    .live-controls button:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    .subject-stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+      gap: 10px;
+      margin-bottom: 18px;
+    }
+
+    .stat-pill {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 14px;
+      text-align: center;
+    }
+
+    .stat-pill .s-val {
+      font-size: 22px;
+      font-weight: 700;
+    }
+
+    .stat-pill .s-lbl {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+
+    .stat-pill.low-risk .s-val {
+      color: var(--low);
+    }
+
+    .stat-pill.high-risk .s-val {
+      color: var(--high);
+    }
+
+    .stat-pill.acc .s-val {
+      color: var(--accent);
+    }
+
+    #risk-timeline {
+      width: 100%;
+      height: 180px;
+      background: var(--surface);
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      overflow: hidden;
+      position: relative;
+    }
+
+    .timeline-bars {
+      display: flex;
+      align-items: flex-end;
+      height: 100%;
+      padding: 8px 6px;
+      gap: 2px;
+      overflow-x: auto;
+    }
+
+    .t-bar {
+      flex-shrink: 0;
+      width: 6px;
+      border-radius: 3px 3px 0 0;
+      transition: height 0.3s ease;
+      cursor: pointer;
+      position: relative;
+    }
+
+    .t-bar:hover::after {
+      content: attr(data-tip);
+      position: absolute;
+      bottom: 110%;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #222;
+      color: #fff;
+      font-size: 10px;
+      padding: 3px 6px;
+      border-radius: 4px;
+      white-space: nowrap;
+      pointer-events: none;
+      z-index: 10;
+    }
+
+    .activity-strip {
+      display: flex;
+      height: 10px;
+      border-radius: 0 0 10px 10px;
+      overflow: hidden;
+    }
+
+    .act-seg {
+      height: 100%;
+      transition: width 0.3s;
+    }
+
+    .act-walking {
+      background: var(--low);
+    }
+
+    .act-upstairs {
+      background: var(--warn);
+    }
+
+    .act-downstairs {
+      background: var(--high);
+    }
+
+    #live-placeholder {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 190px;
+      color: var(--muted);
+      font-size: 14px;
+      gap: 8px;
+    }
+  </style>
+</head>
+
+<body>
+
+  <div id="loading">
+    <div class="spinner"></div>
+    <p id="loading-msg">Training models… this may take a few minutes on first run.</p>
+  </div>
+
+  <div id="app" style="display:none">
+    <header>
+      <div class="logo">🚶</div>
+      <div>
+        <h1>IMU Gait Analysis — Fall Risk Detection</h1>
+        <p>UCI HAR Dataset · Random Forest · XGBoost · LSTM · Time-Series Analysis</p>
+      </div>
+      <span class="badge">UCI HAR</span>
+    </header>
+
+    <div class="container">
+
+      <!-- Dataset info -->
+      <div class="section-title">📦 Dataset</div>
+      <div class="info-banner">
+        <div class="icon">📡</div>
+        <p>
+          <strong>UCI HAR (Human Activity Recognition)</strong> — 30 subjects, 6 activities, 9-axis IMU at 50 Hz.<br>
+          Windows of 128 samples (2.56 s) with 50% overlap. Fall-risk labels:
+          <strong style="color:var(--low)">WALKING → Low Risk</strong> |
+          <strong style="color:var(--high)">WALKING_UPSTAIRS / DOWNSTAIRS → High Risk</strong>.
+          Stationary activities excluded.
+        </p>
+      </div>
+
+      <!-- Model Metrics -->
+      <div class="section-title">🎯 Model Performance</div>
+      <div class="metrics-grid" id="metrics-grid">
+        <!-- populated by JS -->
+      </div>
+
+      <!-- Model Comparison -->
+      <div class="section-title">📊 Model Comparison</div>
+      <div class="chart-grid-1">
+        <div class="chart-card">
+          <h4>Accuracy / F1 / Recall — All Models</h4>
+          <img id="img-model-comparison" src="" alt="Model Comparison" />
+        </div>
+      </div>
+
+      <!-- Confusion Matrices -->
+      <div class="section-title">🔲 Confusion Matrices</div>
+      <div class="chart-grid-3">
+        <div class="chart-card">
+          <h4>Random Forest</h4><img id="img-conf-rf" src="" alt="RF CM" />
+        </div>
+        <div class="chart-card">
+          <h4>XGBoost</h4> <img id="img-conf-xgb" src="" alt="XGB CM" />
+        </div>
+        <div class="chart-card">
+          <h4>LSTM</h4> <img id="img-conf-lstm" src="" alt="LSTM CM" />
+        </div>
+      </div>
+
+      <!-- Learning Curves -->
+      <div class="section-title">📈 Learning Curves</div>
+      <div class="chart-grid-2">
+        <div class="chart-card">
+          <h4>RF & XGBoost — Training vs Test</h4><img id="img-learning" src="" alt="Learning Curves" />
+        </div>
+        <div class="chart-card">
+          <h4>LSTM — Loss & Accuracy</h4> <img id="img-lstm-history" src="" alt="LSTM History" />
+        </div>
+      </div>
+
+      <!-- Time-Series Analysis -->
+      <div class="section-title">📉 Time-Series Analysis</div>
+      <div class="chart-grid-2">
+        <div class="chart-card">
+          <h4>Autocorrelation of Gait Steps (Walking)</h4><img id="img-acf" src="" alt="ACF" />
+        </div>
+        <div class="chart-card">
+          <h4>Gait Features by Activity Type</h4> <img id="img-feature-comp" src="" alt="Feature Comparison" />
+        </div>
+      </div>
+
+      <!-- STL Decomposition -->
+      <div class="section-title">🌊 STL Decomposition — Stride Time Series</div>
+      <div class="chart-grid-3">
+        <div class="chart-card">
+          <h4>Walking (Flat)</h4> <img id="img-stl-walking" src="" alt="STL Walking" />
+        </div>
+        <div class="chart-card">
+          <h4>Upstairs</h4> <img id="img-stl-upstairs" src="" alt="STL Upstairs" />
+        </div>
+        <div class="chart-card">
+          <h4>Downstairs</h4> <img id="img-stl-downstairs" src="" alt="STL Downstairs" />
+        </div>
+      </div>
+
+      <!-- Live Monitoring -->
+      <div class="section-title">🔴 Live Monitoring — Subject Fall Risk</div>
+      <div class="chart-card">
+        <div class="live-controls">
+          <div>
+            <label for="subject-select">Select Subject</label>
+            <select id="subject-select">
+              <option value="">Loading subjects…</option>
+            </select>
+          </div>
+          <div>
+            <label for="model-select">Model</label>
+            <select id="model-select">
+              <option value="rf">🌲 Random Forest</option>
+              <option value="xgb">⚡ XGBoost</option>
+              <option value="lstm">🔁 LSTM</option>
+            </select>
+          </div>
+          <div>
+            <label>&nbsp;</label>
+            <button id="run-btn" onclick="runPrediction()" disabled>▶ Run</button>
+          </div>
+        </div>
+
+        <div id="subject-stats" class="subject-stats" style="display:none">
+          <div class="stat-pill acc">
+            <div class="s-val" id="live-acc">—</div>
+            <div class="s-lbl">Accuracy</div>
+          </div>
+          <div class="stat-pill">
+            <div class="s-val" id="live-total">—</div>
+            <div class="s-lbl">Total Windows</div>
+          </div>
+          <div class="stat-pill low-risk">
+            <div class="s-val" id="live-low">—</div>
+            <div class="s-lbl">Low Risk</div>
+          </div>
+          <div class="stat-pill high-risk">
+            <div class="s-val" id="live-high">—</div>
+            <div class="s-lbl">High Risk</div>
+          </div>
+          <div class="stat-pill">
+            <div class="s-val" id="live-walking">—</div>
+            <div class="s-lbl">Walking</div>
+          </div>
+          <div class="stat-pill">
+            <div class="s-val" id="live-stairs">—</div>
+            <div class="s-lbl">Stairs</div>
+          </div>
+        </div>
+
+        <div id="live-placeholder">👈 Select a subject and click Run to see their fall risk</div>
+        <div id="risk-timeline" style="display:none">
+          <div class="timeline-bars" id="timeline-bars"></div>
+        </div>
+        <div class="activity-strip" id="activity-strip" style="display:none"></div>
+        <div style="margin-top:8px; font-size:11px; color:var(--muted)">
+          <span style="color:var(--low)">■</span> Low Risk (Walking) &nbsp;
+          <span style="color:var(--high)">■</span> High Risk (Stairs) &nbsp;
+          <span style="color:var(--accent2)">■</span> Correct Prediction &nbsp;
+          <span style="color:var(--warn)">■</span> Mis-classified
+        </div>
+      </div>
+
+    </div>
+
+    <footer>IMU Gait Analysis · UCI HAR Dataset · Fall Risk Detection</footer>
+  </div>
+
+  <script>
+    const POLL_MS = 3000;
+
+    function pct(v) { return (v * 100).toFixed(1) + '%'; }
+    function cls(v) { return v >= 0.75 ? 'good' : 'warn'; }
+
+    function buildMetricCard(key, m) {
+      const colors = { rf: 'rf', xgb: 'xgb', lstm: 'lstm' };
+      const names = { rf: '🌲 Random Forest', xgb: '⚡ XGBoost', lstm: '🔁 LSTM' };
+      return `
+      <div class="metric-card ${colors[key]}">
+        <h3>${names[key] || m.model}</h3>
+        <div class="metric-row"><span class="label">Accuracy</span>  <span class="value ${cls(m.accuracy)}">${pct(m.accuracy)}</span></div>
+        <div class="metric-row"><span class="label">F1-Score</span>  <span class="value ${cls(m.f1)}">${pct(m.f1)}</span></div>
+        <div class="metric-row"><span class="label">Recall</span>    <span class="value ${cls(m.recall)}">${pct(m.recall)}</span></div>
+        <div class="metric-row"><span class="label">Precision</span> <span class="value">${pct(m.precision)}</span></div>
+        <div class="metric-sub">Subject-level split · <span>No data leakage</span></div>
+      </div>`;
+    }
+
+    function setImg(id, data) {
+      const el = document.getElementById(id);
+      if (el && data) el.src = data;
+    }
+
+    // ── Load subjects dropdown ─────────────────────────────────────────────────
+    async function loadSubjects() {
+      const subjects = await fetch('/api/subjects').then(r => r.json());
+      const sel = document.getElementById('subject-select');
+      sel.innerHTML = '<option value="">— Choose subject —</option>';
+      subjects.forEach(s => {
+        const opt = document.createElement('option');
+        opt.value = s.id;
+        opt.textContent = `Subject ${String(s.id).padStart(2, '0')}  (${s.total_windows} windows)`;
+        sel.appendChild(opt);
+      });
+      sel.onchange = () => {
+        document.getElementById('run-btn').disabled = !sel.value;
+      };
+      document.getElementById('run-btn').disabled = true;
+    }
+
+    // ── Run prediction & animate chart ────────────────────────────────────────
+    async function runPrediction() {
+      const sid = document.getElementById('subject-select').value;
+      const model = document.getElementById('model-select').value;
+      if (!sid) return;
+
+      const btn = document.getElementById('run-btn');
+      btn.disabled = true;
+      btn.textContent = '⏳ Running…';
+
+      const data = await fetch(`/api/predict/${sid}?model=${model}`).then(r => r.json());
+
+      // Stats
+      const preds = data.predictions;
+      const probs = data.probabilities;
+      const acts = data.activities;
+      const trues = data.true_labels;
+      const nLow = preds.filter(p => p === 0).length;
+      const nHigh = preds.filter(p => p === 1).length;
+      const nWalk = acts.filter(a => a === 'Walking').length;
+      const nStair = acts.length - nWalk;
+
+      document.getElementById('live-acc').textContent = pct(data.accuracy);
+      document.getElementById('live-total').textContent = data.n_windows;
+      document.getElementById('live-low').textContent = nLow;
+      document.getElementById('live-high').textContent = nHigh;
+      document.getElementById('live-walking').textContent = nWalk;
+      document.getElementById('live-stairs').textContent = nStair;
+      document.getElementById('subject-stats').style.display = 'grid';
+
+      // Timeline bars — animated
+      document.getElementById('live-placeholder').style.display = 'none';
+      document.getElementById('risk-timeline').style.display = 'block';
+      document.getElementById('activity-strip').style.display = 'flex';
+
+      const container = document.getElementById('timeline-bars');
+      container.innerHTML = '';
+
+      // Build bars with a small delay each for animation
+      for (let i = 0; i < probs.length; i++) {
+        await new Promise(r => setTimeout(r, 4));
+        const prob = probs[i];
+        const pred = preds[i];
+        const truth = trues[i];
+        const correct = pred === truth;
+        const act = acts[i];
+        const heightPct = Math.max(8, Math.round(prob * 100));
+
+        // Color: correct=accent2(teal), wrong=warn(orange)
+        const color = correct
+          ? (pred === 1 ? 'var(--high)' : 'var(--low)')
+          : 'var(--warn)';
+
+        const bar = document.createElement('div');
+        bar.className = 't-bar';
+        bar.style.height = `${heightPct}%`;
+        bar.style.background = color;
+        bar.dataset.tip = `Win ${i + 1} | ${act} | Risk: ${(prob * 100).toFixed(0)}% | ${correct ? '✓' : '✗'}`;
+        container.appendChild(bar);
+      }
+
+      // Activity strip
+      const strip = document.getElementById('activity-strip');
+      strip.innerHTML = '';
+      const total = acts.length;
+      const actGroups = { Walking: 0, Upstairs: 0, Downstairs: 0 };
+      acts.forEach(a => { if (actGroups[a] !== undefined) actGroups[a]++; });
+      ['Walking', 'Upstairs', 'Downstairs'].forEach(name => {
+        if (!actGroups[name]) return;
+        const seg = document.createElement('div');
+        seg.className = `act-seg act-${name.toLowerCase()}`;
+        seg.style.width = `${(actGroups[name] / total * 100).toFixed(1)}%`;
+        seg.title = `${name}: ${actGroups[name]} windows`;
+        strip.appendChild(seg);
+      });
+
+      btn.disabled = false;
+      btn.textContent = '▶ Run';
+    }
+
+    // ── Dashboard load ────────────────────────────────────────────────────────
+    async function loadDashboard() {
+      const [mRes, iRes] = await Promise.all([
+        fetch('/api/metrics').then(r => r.json()),
+        fetch('/api/images').then(r => r.json()),
+        loadSubjects(),
+      ]);
+
+      const grid = document.getElementById('metrics-grid');
+      grid.innerHTML = ['rf', 'xgb', 'lstm']
+        .filter(k => mRes[k])
+        .map(k => buildMetricCard(k, mRes[k]))
+        .join('');
+
+      setImg('img-model-comparison', iRes.model_comparison);
+      setImg('img-conf-rf', iRes.confusion_rf);
+      setImg('img-conf-xgb', iRes.confusion_xgb);
+      setImg('img-conf-lstm', iRes.confusion_lstm);
+      setImg('img-learning', iRes.learning_curves);
+      setImg('img-lstm-history', iRes.lstm_history);
+      setImg('img-acf', iRes.acf_walking);
+      setImg('img-feature-comp', iRes.feature_comparison);
+      setImg('img-stl-walking', iRes.stl_walking);
+      setImg('img-stl-upstairs', iRes.stl_upstairs);
+      setImg('img-stl-downstairs', iRes.stl_downstairs);
+
+      document.getElementById('loading').style.display = 'none';
+      document.getElementById('app').style.display = 'block';
+    }
+
+    async function poll() {
+      try {
+        const { ready } = await fetch('/api/status').then(r => r.json());
+        if (ready) { await loadDashboard(); }
+        else { setTimeout(poll, POLL_MS); }
+      } catch { setTimeout(poll, POLL_MS); }
+    }
+
+    poll();
+  </script>
+</body>
+
+</html>

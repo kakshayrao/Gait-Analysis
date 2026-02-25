@@ -1,326 +1,280 @@
-# =============================================================================
-# app.py -- Flask Web Frontend
-# =============================================================================
-# Serves a web dashboard for the Gait Analysis project.
-# Pages:
-#   /            -> Dashboard with all results, plots, and metrics
-#   /live        -> Interactive live monitoring with subject selector
-#   /api/subjects  -> JSON list of available subjects
-#   /api/live/<filename> -> Run live monitoring for a specific subject
-# =============================================================================
+"""
+app.py
+======
+Flask web dashboard for the IMU fall-risk detection project.
+Trains all models on first run, then serves results at http://127.0.0.1:5000
+"""
 
 import os
+import sys
 import json
+import time
 import numpy as np
-import joblib
-import matplotlib
-matplotlib.use("Agg")
+import base64
 
-from flask import Flask, render_template, jsonify, send_from_directory, request
+from flask import Flask, jsonify, render_template
 
-from src.data_loader import load_all_subjects
-from src.feature_extraction import (
-    build_feature_dataframe,
-    smooth_signal,
-    normalize_signal,
-    compute_window_features,
-)
-from src.model import train_and_evaluate, train_lstm, load_cached_lstm, plot_all_model_comparison
-from src.time_series_analysis import check_stationarity, decompose_gait
-from src.live_monitoring import simulate_live_monitoring
+# ── constants ─────────────────────────────────────────────────────────────────
+DATA_DIR   = os.path.join("data", "UCI-HAR Dataset")
+OUTPUT_DIR = "output"
 
-# -- Configuration ------------------------------------------------------------
-DATA_DIR   = os.path.join("data", "gait-in-parkinsons-disease-1.0.0")
-OUTPUT_DIR = os.path.join("output")
-MODEL_PATH = os.path.join(OUTPUT_DIR, "rf_model.pkl")
-XGB_MODEL_PATH = os.path.join(OUTPUT_DIR, "xgb_model.pkl")
-FEATURES_PATH = os.path.join(OUTPUT_DIR, "feature_names.json")
-FS = 100
-WINDOW = 300
-STEP = 150
+app = Flask(__name__)
 
-app = Flask(__name__, static_folder="output", static_url_path="/output")
-
-# -- Globals (loaded once at startup) -----------------------------------------
-subjects = []
-rf_model = None
-xgb_model = None
-lstm_model = None
-lstm_scaler = None
-lstm_seq_len = 10
-feature_names = []
-features_df = None
-metrics_data = {}
+# In-memory cache populated on startup
+_cache = {}
 
 
-def startup():
-    """Load data, train model (or load cached), and prepare metrics."""
-    global subjects, rf_model, xgb_model, lstm_model, lstm_scaler
-    global lstm_seq_len, feature_names, features_df, metrics_data
+# ── helpers ───────────────────────────────────────────────────────────────────
 
-    print("Loading subjects...")
-    subjects[:] = load_all_subjects(DATA_DIR)
+def _img_b64(filename: str) -> str:
+    """Read a PNG from output/ and return a base64 data-URI string."""
+    path = os.path.join(OUTPUT_DIR, filename)
+    if not os.path.exists(path):
+        return ""
+    with open(path, "rb") as f:
+        return "data:image/png;base64," + base64.b64encode(f.read()).decode()
 
-    print("Extracting features...")
-    features_df_local = build_feature_dataframe(subjects, WINDOW, STEP, FS)
-    features_df = features_df_local
 
-    # -- Train or load RF + XGBoost ---------------------------------------
-    if (os.path.exists(MODEL_PATH)
-            and os.path.exists(XGB_MODEL_PATH)
-            and os.path.exists(FEATURES_PATH)):
-        print("Loading cached RF + XGBoost models...")
-        rf_model = joblib.load(MODEL_PATH)
-        xgb_model = joblib.load(XGB_MODEL_PATH)
-        with open(FEATURES_PATH) as f:
-            feature_names[:] = json.load(f)
-    else:
-        print("Training RF + XGBoost models...")
-        rf_model_local, feat_names = train_and_evaluate(features_df, OUTPUT_DIR)
-        rf_model = rf_model_local
-        feature_names[:] = feat_names
-        # Models are saved inside train_and_evaluate, also load XGBoost
-        xgb_model = joblib.load(XGB_MODEL_PATH)
+def _load_cached_metrics() -> dict:
+    """Load RF + XGBoost metrics from pkl model meta + LSTM metrics JSON."""
+    import joblib
+    from sklearn.metrics import accuracy_score, f1_score, recall_score, precision_score
 
-    # -- Train or load LSTM -----------------------------------------------
-    try:
-        lstm_result = train_lstm(features_df, OUTPUT_DIR)
-        lstm_model = lstm_result["model"]
-        lstm_scaler = lstm_result["scaler"]
-        lstm_seq_len = lstm_result["seq_len"]
-        metrics_data["lstm"] = {
-            "accuracy":  round(lstm_result["accuracy"], 4),
-            "precision": round(lstm_result["precision"], 4),
-            "recall":    round(lstm_result["recall"], 4),
-            "f1":        round(lstm_result["f1"], 4),
-        }
-    except Exception as e:
-        print(f"  [WARN] LSTM skipped: {e}")
-        metrics_data["lstm"] = {
-            "accuracy": "--", "precision": "--", "recall": "--", "f1": "--"
-        }
+    metrics = {}
 
-    # -- Run time-series analysis -----------------------------------------
-    healthy_subj = next((s for s in subjects if s[1] == 0), None)
-    parkinson_subj = next((s for s in subjects if s[1] == 1), None)
+    # LSTM metrics from JSON
+    lstm_path = os.path.join(OUTPUT_DIR, "lstm_metrics.json")
+    if os.path.exists(lstm_path):
+        with open(lstm_path) as f:
+            metrics["lstm"] = json.load(f)
 
-    for subj, tag in [(healthy_subj, "Healthy"), (parkinson_subj, "Parkinson")]:
-        if subj is None:
-            continue
-        df, _, _ = subj
-        from scipy.signal import find_peaks
-        sig = normalize_signal(smooth_signal(df["total_force"].values))
-        peaks, _ = find_peaks(sig, height=np.mean(sig)*0.5, distance=int(FS*0.4))
-        if len(peaks) >= 4:
-            intervals = np.diff(peaks) / FS
-            result = check_stationarity(intervals, label=tag)
-            if result:
-                metrics_data[f"adf_{tag.lower()}"] = result
-            decompose_gait(intervals, label=tag, output_dir=OUTPUT_DIR)
+    return metrics
 
-    # -- Collect summary metrics for RF + XGBoost -------------------------
-    from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-    from sklearn.model_selection import GroupShuffleSplit
 
-    feature_cols = [c for c in features_df.columns if c not in ("label", "subject_id")]
-    X = features_df[feature_cols].values
-    y = features_df["label"].values
-    groups = features_df["subject_id"].values
+def _run_pipeline():
+    """Full training + analysis pipeline (called once at startup if not cached)."""
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    gss = GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
-    train_idx, test_idx = next(gss.split(X, y, groups))
-    X_test, y_test = X[test_idx], y[test_idx]
+    # ── Load data ──────────────────────────────────────────────────────────
+    from src.data_loader import load_uci_har, make_fall_risk_dataset
+    print("Loading UCI HAR dataset...")
+    X_all, y_all, subjects_all = load_uci_har(DATA_DIR)
 
-    def _metrics(y_true, y_pred):
-        return {
-            "accuracy":  round(accuracy_score(y_true, y_pred), 4),
-            "precision": round(precision_score(y_true, y_pred, zero_division=0), 4),
-            "recall":    round(recall_score(y_true, y_pred, zero_division=0), 4),
-            "f1":        round(f1_score(y_true, y_pred, zero_division=0), 4),
-        }
+    print("\nCreating fall-risk dataset...")
+    X_mob, y_risk, subj_mob, y_activity = make_fall_risk_dataset(
+        X_all, y_all, subjects_all)
 
-    # Random Forest
-    y_pred_rf = rf_model.predict(X_test)
-    metrics_data["rf"] = _metrics(y_test, y_pred_rf)
+    # ── Feature extraction ─────────────────────────────────────────────────
+    from src.feature_extraction import build_feature_dataframe
+    print("\nExtracting features...")
+    features_df = build_feature_dataframe(X_mob, y_risk, y_activity, subj_mob)
+    _cache["features_df"] = features_df
 
-    # XGBoost
-    y_pred_xgb = xgb_model.predict(X_test)
-    metrics_data["xgb"] = _metrics(y_test, y_pred_xgb)
+    # ── Train RF + XGBoost ────────────────────────────────────────────────
+    from src.model import (train_classical_models, train_lstm,
+                            plot_model_comparison)
+    print("\nTraining RF + XGBoost models...")
+    classical_metrics, X_test, y_test = train_classical_models(features_df, OUTPUT_DIR)
 
-    metrics_data["dataset"] = {
-        "total_files": len(subjects),
-        "healthy": sum(1 for _, l, _ in subjects if l == 0),
-        "parkinson": sum(1 for _, l, _ in subjects if l == 1),
-        "total_windows": len(features_df),
-        "healthy_windows": int((features_df["label"] == 0).sum()),
-        "parkinson_windows": int((features_df["label"] == 1).sum()),
+    # ── Time-series analysis ──────────────────────────────────────────────
+    from src.time_series import run_full_time_series_analysis
+    from src.preprocessing import extract_imu_components
+
+    walking_mask = features_df[features_df["activity"] == 1]
+    sample_row   = walking_mask.index[0] if len(walking_mask) > 0 else 0
+    sample_win   = X_mob[sample_row]
+    _, _, _, _, _, _, acc_mag, _ = extract_imu_components(sample_win)
+
+    print("\nRunning time-series analysis...")
+    run_full_time_series_analysis(features_df, acc_mag)
+
+    # ── Train LSTM ────────────────────────────────────────────────────────
+    print("\nTraining LSTM model...")
+    lstm_metrics = train_lstm(X_mob, y_risk, subj_mob, OUTPUT_DIR)
+
+    # ── Model comparison chart ────────────────────────────────────────────
+    all_metrics = {
+        "rf":   classical_metrics["rf"],
+        "xgb":  classical_metrics["xgb"],
+        "lstm": lstm_metrics,
     }
+    plot_model_comparison(all_metrics, OUTPUT_DIR)
 
-    # -- Generate all-3-models comparison chart ----------------------------
-    try:
-        plot_all_model_comparison(
-            {
-                "Random Forest": {
-                    "Accuracy": metrics_data["rf"]["accuracy"],
-                    "Precision": metrics_data["rf"]["precision"],
-                    "Recall": metrics_data["rf"]["recall"],
-                    "F1": metrics_data["rf"]["f1"],
-                },
-                "XGBoost": {
-                    "Accuracy": metrics_data["xgb"]["accuracy"],
-                    "Precision": metrics_data["xgb"]["precision"],
-                    "Recall": metrics_data["xgb"]["recall"],
-                    "F1": metrics_data["xgb"]["f1"],
-                },
-                "LSTM": {
-                    "Accuracy": metrics_data["lstm"]["accuracy"],
-                    "Precision": metrics_data["lstm"]["precision"],
-                    "Recall": metrics_data["lstm"]["recall"],
-                    "F1": metrics_data["lstm"]["f1"],
-                },
-            },
-            OUTPUT_DIR,
-        )
-    except Exception as e:
-        print(f"  [WARN] Model comparison plot skipped: {e}")
+    # Save all metrics to JSON for the API
+    with open(os.path.join(OUTPUT_DIR, "all_metrics.json"), "w") as f:
+        json.dump(all_metrics, f, indent=2)
 
-    print("Startup complete!")
+    _cache["metrics"] = all_metrics
+    print("\nStartup complete!\n")
+    print("  [OK] Open http://127.0.0.1:5000 in your browser\n")
 
 
-# -- Routes -------------------------------------------------------------------
+def _models_cached() -> bool:
+    """Return True if models already trained and saved to disk."""
+    required = ["rf_model.pkl", "xgb_model.pkl",
+                 "lstm_model.keras", "lstm_metrics.json",
+                 "model_comparison.png"]
+    return all(os.path.exists(os.path.join(OUTPUT_DIR, f)) for f in required)
+
+
+def _load_dataset_into_cache():
+    """Load UCI HAR into memory for fast live predictions."""
+    if "X_mob" in _cache:
+        return
+    from src.data_loader import load_uci_har, make_fall_risk_dataset
+    from src.feature_extraction import build_feature_dataframe
+    X_all, y_all, subjects_all = load_uci_har(DATA_DIR)
+    X_mob, y_risk, subj_mob, y_activity = make_fall_risk_dataset(
+        X_all, y_all, subjects_all)
+    features_df = build_feature_dataframe(X_mob, y_risk, y_activity, subj_mob)
+    _cache["X_mob"]       = X_mob
+    _cache["y_risk"]      = y_risk
+    _cache["subj_mob"]    = subj_mob
+    _cache["y_activity"]  = y_activity
+    _cache["features_df"] = features_df
+
+
+# ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.route("/")
-def dashboard():
-    """Main dashboard page showing all results."""
-    return render_template("dashboard.html", metrics=metrics_data)
+def index():
+    return render_template("index.html")
 
 
-@app.route("/live")
-def live_page():
-    """Interactive live monitoring page."""
-    return render_template("live.html")
+@app.route("/api/status")
+def api_status():
+    return jsonify({"ready": bool(_cache.get("metrics"))})
 
 
 @app.route("/api/subjects")
-def get_subjects():
-    """Return list of available subjects with labels."""
-    result = []
-    for df, label, fname in subjects:
-        result.append({
-            "filename": fname,
-            "label": int(label),
-            "label_name": "Healthy" if label == 0 else "Parkinson",
-            "duration_s": round(len(df) / FS, 1),
-            "samples": len(df),
+def api_subjects():
+    """List all subject IDs available in the mobile (fall-risk) dataset."""
+    _load_dataset_into_cache()
+    subj_mob   = _cache["subj_mob"]
+    y_activity = _cache["y_activity"]
+    unique_subjects = sorted(np.unique(subj_mob).tolist())
+    activity_names = {1: "Walking", 2: "Upstairs", 3: "Downstairs"}
+    subjects_info = []
+    for sid in unique_subjects:
+        mask = subj_mob == sid
+        acts = y_activity[mask]
+        subjects_info.append({
+            "id": int(sid),
+            "total_windows": int(mask.sum()),
+            "walking":    int((acts == 1).sum()),
+            "upstairs":   int((acts == 2).sum()),
+            "downstairs": int((acts == 3).sum()),
         })
-    return jsonify(result)
+    return jsonify(subjects_info)
 
 
-@app.route("/api/live/<filename>")
-def run_live(filename):
+@app.route("/api/predict/<int:subject_id>")
+def api_predict(subject_id: int):
     """
-    Run live monitoring simulation for a specific subject.
-    Accepts ?model=rf|xgb|lstm query param (default: rf).
-    Returns JSON array of (time, risk_probability) pairs.
+    Run fall-risk predictions for a specific subject.
+    Query param: model = rf | xgb | lstm  (default: rf)
+    Returns per-window predictions and probabilities.
     """
-    model_choice = request.args.get("model", "rf")
+    from flask import request as freq
+    model_name = freq.args.get("model", "rf").lower()
 
-    if model_choice == "lstm":
-        if lstm_model is None:
-            return jsonify({"error": "LSTM model not available"}), 400
-    elif model_choice == "xgb":
-        if xgb_model is None:
-            return jsonify({"error": "XGBoost model not available"}), 400
+    _load_dataset_into_cache()
+    X_mob      = _cache["X_mob"]
+    y_risk     = _cache["y_risk"]
+    subj_mob   = _cache["subj_mob"]
+    y_activity = _cache["y_activity"]
+    features_df = _cache["features_df"]
+
+    mask = subj_mob == subject_id
+    if not mask.any():
+        return jsonify({"error": f"Subject {subject_id} not found"}), 404
+
+    y_true = y_risk[mask].tolist()
+    acts   = y_activity[mask].tolist()
+    act_names = {1: "Walking", 2: "Upstairs", 3: "Downstairs"}
+
+    if model_name in ("rf", "xgb"):
+        import joblib
+        key_file = "rf_model.pkl" if model_name == "rf" else "xgb_model.pkl"
+        model = joblib.load(os.path.join(OUTPUT_DIR, key_file))
+        feature_cols = [c for c in features_df.columns
+                        if c not in ("label", "subject_id", "activity")]
+        subj_df = features_df[features_df["subject_id"] == subject_id]
+        X_subj  = subj_df[feature_cols].values.astype(np.float32)
+        probs   = model.predict_proba(X_subj)[:, 1].tolist()
+        preds   = (np.array(probs) >= 0.5).astype(int).tolist()
+        acts    = subj_df["activity"].tolist()
+        y_true  = subj_df["label"].tolist()
     else:
-        if rf_model is None:
-            return jsonify({"error": "Random Forest model not available"}), 400
+        # LSTM on raw sequences
+        from tensorflow.keras.models import load_model
+        lstm_model = load_model(os.path.join(OUTPUT_DIR, "lstm_model.keras"))
+        mu  = np.load(os.path.join(OUTPUT_DIR, "lstm_norm_mu.npy"))
+        std = np.load(os.path.join(OUTPUT_DIR, "lstm_norm_std.npy"))
+        X_subj = X_mob[mask]
+        X_norm = (X_subj - mu) / (std + 1e-8)
+        probs  = lstm_model.predict(X_norm, verbose=0).ravel().tolist()
+        preds  = (np.array(probs) >= 0.5).astype(int).tolist()
 
-    # Find the subject
-    subj = next((s for s in subjects if s[2] == filename), None)
-    if subj is None:
-        return jsonify({"error": "Subject not found"}), 404
+    accuracy = float(np.mean(np.array(preds) == np.array(y_true))) if y_true else 0.0
 
-    df, label, fname = subj
-    df = df.ffill().fillna(0)
-
-    left  = normalize_signal(smooth_signal(df["total_left"].values))
-    right = normalize_signal(smooth_signal(df["total_right"].values))
-    total = normalize_signal(smooth_signal(df["total_force"].values))
-
-    window_size = 300
-    step = 50
-    results = []
-
-    if model_choice == "lstm":
-        # -- LSTM path: collect features, build sequences, predict --------
-        all_feats = []
-        all_times = []
-        for i in range(0, len(total) - window_size + 1, step):
-            lw = left[i : i + window_size]
-            rw = right[i : i + window_size]
-            tw = total[i : i + window_size]
-
-            feats = compute_window_features(lw, rw, tw, FS)
-            if feats is None:
-                continue
-            all_feats.append([feats[f] for f in feature_names])
-            all_times.append(round((i + window_size / 2) / FS, 2))
-
-        # Build sliding sequences of length lstm_seq_len
-        if len(all_feats) >= lstm_seq_len:
-            feat_array = np.array(all_feats, dtype=np.float32)
-            # Scale using the same scaler used during training
-            feat_scaled = lstm_scaler.transform(feat_array)
-
-            for j in range(len(feat_scaled) - lstm_seq_len + 1):
-                seq = feat_scaled[j : j + lstm_seq_len]
-                seq_input = seq.reshape(1, lstm_seq_len, -1)
-                prob = float(lstm_model.predict(seq_input, verbose=0)[0][0])
-                # Use the centre time of the last window in the sequence
-                centre_time = all_times[j + lstm_seq_len - 1]
-                results.append({
-                    "time": centre_time,
-                    "risk": round(prob, 4),
-                })
-    else:
-        # -- RF / XGBoost path --------------------------------------------
-        model = rf_model if model_choice == "rf" else xgb_model
-        for i in range(0, len(total) - window_size + 1, step):
-            lw = left[i : i + window_size]
-            rw = right[i : i + window_size]
-            tw = total[i : i + window_size]
-
-            feats = compute_window_features(lw, rw, tw, FS)
-            if feats is None:
-                continue
-
-            x = np.array([[feats[f] for f in feature_names]])
-            prob = float(model.predict_proba(x)[0][1])
-            centre_time = round((i + window_size / 2) / FS, 2)
-
-            results.append({
-                "time": centre_time,
-                "risk": round(prob, 4),
-            })
-
-    label_name = "Healthy" if label == 0 else "Parkinson"
-    model_names = {"rf": "Random Forest", "xgb": "XGBoost", "lstm": "LSTM"}
     return jsonify({
-        "filename": fname,
-        "label": label_name,
-        "model": model_names.get(model_choice, "Random Forest"),
-        "duration_s": round(len(df) / FS, 1),
-        "data": results,
+        "subject_id":  subject_id,
+        "model":       model_name,
+        "n_windows":   len(preds),
+        "accuracy":    round(accuracy, 4),
+        "predictions": preds,
+        "probabilities": [round(p, 4) for p in probs],
+        "true_labels": y_true,
+        "activities":  [act_names.get(a, str(a)) for a in acts],
     })
 
 
-@app.route("/output/<path:filename>")
-def serve_plot(filename):
-    return send_from_directory(OUTPUT_DIR, filename)
+@app.route("/api/metrics")
+def api_metrics():
+    metrics = _cache.get("metrics", {})
+    if not metrics:
+        path = os.path.join(OUTPUT_DIR, "all_metrics.json")
+        if os.path.exists(path):
+            with open(path) as f:
+                metrics = json.load(f)
+    return jsonify(metrics)
 
+
+@app.route("/api/images")
+def api_images():
+    images = {
+        "model_comparison":          _img_b64("model_comparison.png"),
+        "confusion_rf":              _img_b64("confusion_matrix_rf.png"),
+        "confusion_xgb":             _img_b64("confusion_matrix_xgb.png"),
+        "confusion_lstm":            _img_b64("confusion_matrix_lstm.png"),
+        "lstm_history":              _img_b64("lstm_training_history.png"),
+        "learning_curves":           _img_b64("learning_curves_rf_xgb.png"),
+        "acf_walking":               _img_b64("acf_walking.png"),
+        "stl_walking":               _img_b64("stl_walking.png"),
+        "stl_upstairs":              _img_b64("stl_upstairs.png"),
+        "stl_downstairs":            _img_b64("stl_downstairs.png"),
+        "feature_comparison":        _img_b64("feature_comparison_by_activity.png"),
+    }
+    return jsonify(images)
+
+
+# ── Startup ───────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    startup()
-    print("\n  [OK] Open http://127.0.0.1:5000 in your browser\n")
-    app.run(debug=False, port=5000)
+    if not os.path.exists(DATA_DIR):
+        print("[ERROR] Dataset not found. Run: python download_data.py")
+        sys.exit(1)
+
+    if _models_cached():
+        print("Loading cached models...")
+        path = os.path.join(OUTPUT_DIR, "all_metrics.json")
+        if os.path.exists(path):
+            with open(path) as f:
+                _cache["metrics"] = json.load(f)
+        print("\nStartup complete!")
+        print("\n  [OK] Open http://127.0.0.1:5000 in your browser\n")
+    else:
+        _run_pipeline()
+
+    app.run(debug=False, host="127.0.0.1", port=5000)

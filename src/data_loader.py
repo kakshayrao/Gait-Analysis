@@ -1,109 +1,127 @@
-# =============================================================================
-# data_loader.py
-# =============================================================================
-# Loads PhysioNet "Gait in Parkinson's Disease" (gaitpdb) dataset files.
-#
-# Each .txt file contains tab-separated columns:
-#   Column 0  : Time (seconds)
-#   Columns 1-8  : Left foot sensors  (L1 – L8)
-#   Columns 9-16 : Right foot sensors (R1 – R8)
-#   Column 17 : Total left foot force   (provided by dataset)
-#   Column 18 : Total right foot force   (provided by dataset)
-#
-# Filename convention:
-#   GaCo*  → Healthy Control
-#   GaPt*  → Parkinson's Disease patient
-#   JuCo*  → Healthy Control
-#   JuPt*  → Parkinson's Disease patient
-#   SiCo*  → Healthy Control
-#   SiPt*  → Parkinson's Disease patient
-# =============================================================================
+"""
+src/data_loader.py
+==================
+Loads the UCI HAR raw Inertial Signals dataset.
+
+Default data path: data/UCI-HAR Dataset   (note the hyphen)
+
+UCI HAR structure (raw signals):
+  train/Inertial Signals/body_acc_x_train.txt  (128 timesteps per row)
+  train/Inertial Signals/body_gyro_x_train.txt
+  ...
+  train/subject_train.txt   (subject ID per window)
+  train/y_train.txt         (activity label 1-6 per window)
+"""
 
 import os
 import numpy as np
-import pandas as pd
+
+DEFAULT_DATA_DIR = os.path.join("data", "UCI-HAR Dataset")
+
+ACTIVITY_NAMES = {
+    1: "WALKING",
+    2: "WALKING_UPSTAIRS",
+    3: "WALKING_DOWNSTAIRS",
+    4: "SITTING",
+    5: "STANDING",
+    6: "LAYING",
+}
+
+# UCI HAR raw signal channels we use
+SIGNAL_FILES = [
+    "body_acc_x",
+    "body_acc_y",
+    "body_acc_z",
+    "body_gyro_x",
+    "body_gyro_y",
+    "body_gyro_z",
+]
 
 
-# Column names for the 19-column gaitpdb format
-COLUMN_NAMES = (
-    ["time"]
-    + [f"L{i}" for i in range(1, 9)]   # 8 left-foot sensors
-    + [f"R{i}" for i in range(1, 9)]   # 8 right-foot sensors
-    + ["total_left", "total_right"]      # aggregated force per foot
-)
+def _load_txt(path: str) -> np.ndarray:
+    """Load a whitespace-delimited text file as a float32 array."""
+    return np.loadtxt(path, dtype=np.float32)
 
 
-def get_label_from_filename(filename: str) -> int:
+def _load_split(data_dir: str, split: str) -> tuple:
     """
-    Determine subject label from the filename.
+    Load one split ('train' or 'test') from the UCI HAR raw signals.
 
     Returns
     -------
-    0 : Healthy Control  (filename contains 'Co')
-    1 : Parkinson's Disease  (filename contains 'Pt')
-    -1 : Unknown / skipped
+    X : np.ndarray  shape (N, 128, 6)   6 IMU channels x 128 timesteps
+    y : np.ndarray  shape (N,)          activity labels  1-6
+    subjects : np.ndarray shape (N,)    subject IDs      1-30
     """
-    base = os.path.basename(filename)
-    if "Co" in base:
-        return 0   # Healthy
-    elif "Pt" in base:
-        return 1   # Parkinson
-    return -1       # Unknown — will be filtered out
+    inertial_dir = os.path.join(data_dir, split, "Inertial Signals")
+
+    channels = []
+    for sig in SIGNAL_FILES:
+        fpath = os.path.join(inertial_dir, f"{sig}_{split}.txt")
+        channels.append(_load_txt(fpath))          # shape (N, 128)
+
+    X = np.stack(channels, axis=-1)                # (N, 128, 6)
+
+    y_path = os.path.join(data_dir, split, f"y_{split}.txt")
+    y = _load_txt(y_path).astype(np.int32).ravel()
+
+    subj_path = os.path.join(data_dir, split, f"subject_{split}.txt")
+    subjects = _load_txt(subj_path).astype(np.int32).ravel()
+
+    return X, y, subjects
 
 
-def load_subject_file(filepath: str) -> pd.DataFrame:
+def load_uci_har(data_dir: str = DEFAULT_DATA_DIR) -> tuple:
     """
-    Read a single gaitpdb .txt file and return a tidy DataFrame.
-
-    An extra column 'total_force' is computed as the sum of total_left
-    and total_right for whole-body vertical ground reaction force.
-    """
-    # Files are tab-separated with no header row
-    df = pd.read_csv(filepath, sep="\t", header=None)
-
-    # Some files may have 19 or 20 columns; keep only the first 19
-    df = df.iloc[:, :19]
-    df.columns = COLUMN_NAMES
-
-    # Derived feature: overall vertical ground reaction force
-    df["total_force"] = df["total_left"] + df["total_right"]
-
-    return df
-
-
-def load_all_subjects(data_dir: str):
-    """
-    Load every valid .txt walking-trial file from *data_dir*.
+    Load the full UCI HAR dataset (train + test splits merged).
 
     Returns
     -------
-    subjects : list of (DataFrame, label, filename) tuples
-        Only files whose label is 0 or 1 are included.
+    X        : np.ndarray (N, 128, 6)   raw IMU windows
+    y        : np.ndarray (N,)          activity labels 1-6
+    subjects : np.ndarray (N,)          subject IDs
     """
-    subjects = []
-    txt_files = sorted(
-        f for f in os.listdir(data_dir) if f.endswith(".txt")
-    )
+    X_tr, y_tr, subj_tr = _load_split(data_dir, "train")
+    X_te, y_te, subj_te = _load_split(data_dir, "test")
 
-    if not txt_files:
-        raise FileNotFoundError(
-            f"No .txt files found in '{data_dir}'. "
-            "Please download the PhysioNet gaitpdb dataset first."
-        )
+    X        = np.concatenate([X_tr, X_te], axis=0)
+    y        = np.concatenate([y_tr, y_te], axis=0)
+    subjects = np.concatenate([subj_tr, subj_te], axis=0)
 
-    for fname in txt_files:
-        label = get_label_from_filename(fname)
-        if label == -1:
-            continue  # skip non-subject files (e.g. README)
+    n_windows = len(y)
+    counts = {ACTIVITY_NAMES[i]: int((y == i).sum()) for i in range(1, 7)}
+    print(f"Loaded {n_windows} windows from {len(np.unique(subjects))} subjects.")
+    for name, cnt in counts.items():
+        print(f"  {name:25s}: {cnt:5d} windows")
 
-        filepath = os.path.join(data_dir, fname)
-        try:
-            df = load_subject_file(filepath)
-            subjects.append((df, label, fname))
-        except Exception as exc:
-            print(f"  [WARN] Skipping {fname}: {exc}")
+    return X, y, subjects
 
-    print(f"Loaded {len(subjects)} subject files "
-          f"({sum(1 for _, l, _ in subjects if l == 0)} Healthy, "
-          f"{sum(1 for _, l, _ in subjects if l == 1)} Parkinson)")
-    return subjects
+
+def make_fall_risk_dataset(X: np.ndarray,
+                           y: np.ndarray,
+                           subjects: np.ndarray) -> tuple:
+    """
+    Filter to mobile activities and create binary fall-risk labels.
+
+    Fall Risk mapping:
+      WALKING (1)             -> 0  (Low)
+      WALKING_UPSTAIRS (2)    -> 1  (High)
+      WALKING_DOWNSTAIRS (3)  -> 1  (High)
+      SITTING/STANDING/LAYING -> excluded
+
+    Returns
+    -------
+    X_mob, y_risk, subj_mob, y_activity (original 1-3 labels)
+    """
+    mobile_mask = np.isin(y, [1, 2, 3])
+    X_mob    = X[mobile_mask]
+    y_acts   = y[mobile_mask]
+    subj_mob = subjects[mobile_mask]
+
+    y_risk = np.where(y_acts == 1, 0, 1).astype(np.int32)  # 1=low, 2,3=high
+
+    n_low  = int((y_risk == 0).sum())
+    n_high = int((y_risk == 1).sum())
+    print(f"\nFall-risk dataset: {len(y_risk)} windows  "
+          f"| Low risk: {n_low}  High risk: {n_high}")
+    return X_mob, y_risk, subj_mob, y_acts

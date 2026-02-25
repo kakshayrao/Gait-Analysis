@@ -1,48 +1,49 @@
 """
-Download the PhysioNet Gait in Parkinson's Disease (gaitpdb) dataset.
-Fetches the file index page, extracts all .txt file links, and downloads
-them into the data/ directory.
+download_data.py
+================
+Downloads, verifies, and extracts the UCI HAR (Human Activity Recognition)
+dataset into data/raw/.
 """
 import os
-import re
+import zipfile
 import urllib.request
+import shutil
 
-BASE_URL = "https://physionet.org/files/gaitpdb/1.0.0/"
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
-
-
-def get_file_list():
-    """Scrape the directory listing page for .txt file links."""
-    print(f"Fetching file list from {BASE_URL} ...")
-    req = urllib.request.Request(BASE_URL, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req) as resp:
-        html = resp.read().decode("utf-8")
-    # Links look like: href="GaCo01_01.txt"
-    files = re.findall(r'href="([^"]+\.txt)"', html)
-    return sorted(set(files))
+URL      = ("https://archive.ics.uci.edu/ml/machine-learning-databases"
+            "/00240/UCI%20HAR%20Dataset.zip")
+DEST_ZIP = os.path.join("data", "raw", "UCI_HAR.zip")
+DEST_DIR = os.path.join("data", "raw")
 
 
-def download_file(filename):
-    url = BASE_URL + filename
-    dest = os.path.join(DATA_DIR, filename)
-    if os.path.exists(dest):
-        return False  # already downloaded
-    urllib.request.urlretrieve(url, dest)
-    return True
+def progress(block_num, block_size, total_size):
+    downloaded = block_num * block_size
+    pct = min(downloaded / total_size * 100, 100) if total_size > 0 else 0
+    bar = "#" * int(pct // 2)
+    print(f"\r  [{bar:<50}] {pct:5.1f}%", end="", flush=True)
 
 
-def main():
-    os.makedirs(DATA_DIR, exist_ok=True)
-    files = get_file_list()
-    print(f"Found {len(files)} .txt files to download.")
+def download():
+    os.makedirs(DEST_DIR, exist_ok=True)
 
-    for i, fname in enumerate(files, 1):
-        new = download_file(fname)
-        status = "downloaded" if new else "exists"
-        print(f"  [{i:3d}/{len(files)}] {fname} — {status}")
+    if not os.path.exists(DEST_ZIP):
+        print("Downloading UCI HAR Dataset (~25 MB)...")
+        urllib.request.urlretrieve(URL, DEST_ZIP, progress)
+        print("\n  Download complete.")
+    else:
+        print("  Archive already present, skipping download.")
 
-    print(f"\nDone. Files saved to: {os.path.abspath(DATA_DIR)}")
+    uci_dir = os.path.join(DEST_DIR, "UCI HAR Dataset")
+    if os.path.exists(uci_dir):
+        print("  Dataset already extracted.")
+    else:
+        print("Extracting...")
+        with zipfile.ZipFile(DEST_ZIP, "r") as zf:
+            zf.extractall(DEST_DIR)
+        print(f"  Extracted to {uci_dir}")
+
+    print("\nDone! UCI HAR dataset is ready.")
+    return uci_dir
 
 
 if __name__ == "__main__":
-    main()
+    download()
