@@ -1,0 +1,13 @@
+﻿EXTRACTED FIGURES
+
+From output/:
+[OK] Figure_5_1: ACF Plot — Walking Activity -> Figure_5_1_acf_walking.png
+[OK] Figure_5_2: STL Decomposition — Walking Activity -> Figure_5_2_stl_walking.png
+[OK] Figure_5_3: Feature Comparison by Activity (Box Plots) -> Figure_5_3_feature_comparison_by_activity.png
+[OK] Figure_6_1: Model Comparison Chart (Accuracy / F1 / Recall) -> Figure_6_1_model_comparison.png
+[OK] Figure_6_2A: Confusion Matrix — RF -> Figure_6_2A_confusion_matrix_rf.png
+[OK] Figure_6_2B: Confusion Matrix — XGBoost -> Figure_6_2B_confusion_matrix_xgb.png
+[OK] Figure_6_2C: Confusion Matrix — LSTM -> Figure_6_2C_confusion_matrix_lstm.png
+[OK] Figure_6_3: Learning Curves — Random Forest & XGBoost -> Figure_6_3_learning_curves_rf_xgb.png
+[OK] Figure_6_4: LSTM Training History (Loss & Accuracy) -> Figure_6_4_lstm_training_history.png
+[MISSING] Figure_7_1: Live Monitoring Dashboard — Per-Subject Risk View (expected source: dashboard_live_subject_risk_view.png)
